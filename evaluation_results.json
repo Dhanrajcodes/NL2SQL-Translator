@@ -1,0 +1,6 @@
+{
+  "total_examples": 3,
+  "exact_match_accuracy": 0.6666666666666666,
+  "exact_matches": 2,
+  "average_bleu_score": 0.9583333333333334
+}
