@@ -5,7 +5,6 @@ Visualization script for training progress and model evaluation
 import os
 import json
 import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -103,7 +102,7 @@ def plot_model_comparison():
     """
     # This would typically load results from different models and compare them
     # For now, we'll create a placeholder
-    models = ['T5-small (WikiSQL)', 'T5-base (WikiSQL)', 'T5-small (Spider)']
+    models = ['gemma3:1b', 'gemma3-nl2sql', 'T5-small (Spider)']
     exact_match = [0.65, 0.72, 0.58]
     bleu_scores = [0.78, 0.82, 0.71]
     

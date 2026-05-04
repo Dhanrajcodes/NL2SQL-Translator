@@ -1,0 +1,174 @@
+{
+  "test_cases": [
+    {
+      "question": "List all employees.",
+      "actual_sql": "SELECT * FROM employee;"
+    },
+    {
+      "question": "Show all employees with salary above 50000",
+      "actual_sql": "SELECT * FROM employee WHERE salary > 50000;"
+    },
+    {
+      "question": "Find the average salary of all employees",
+      "actual_sql": "SELECT AVG(salary) FROM employee;"
+    },
+    {
+      "question": "Get the highest paid employee",
+      "actual_sql": "SELECT * FROM employee ORDER BY salary DESC LIMIT 1;"
+    },
+    {
+      "question": "Count the number of employees in each department",
+      "actual_sql": "SELECT department, COUNT(*) FROM employee GROUP BY department;"
+    },
+    {
+      "question": "List all departments with their average employee salary",
+      "actual_sql": "SELECT department, AVG(salary) FROM employee GROUP BY department;"
+    },
+    {
+      "question": "Find employees who work in the IT department",
+      "actual_sql": "SELECT * FROM employee WHERE department = 'IT';"
+    },
+    {
+      "question": "Show the total salary expense for each department",
+      "actual_sql": "SELECT department, SUM(salary) FROM employee GROUP BY department;"
+    }
+  ],
+  "base_model": {
+    "name": "gemma3:1b",
+    "results": {
+      "exact_matches": 0,
+      "total_tests": 8,
+      "exact_match_accuracy": 0.0,
+      "average_similarity": 0.5339337380455802,
+      "predictions": [
+        {
+          "question": "List all employees.",
+          "actual_sql": "SELECT * FROM employee;",
+          "predicted_sql": "```sql\nSELECT * FROM employees;\n```",
+          "exact_match": false,
+          "similarity_score": 0.4
+        },
+        {
+          "question": "Show all employees with salary above 50000",
+          "actual_sql": "SELECT * FROM employee WHERE salary > 50000;",
+          "predicted_sql": "```sql\nSELECT * FROM employees WHERE salary > 50000;\n```",
+          "exact_match": false,
+          "similarity_score": 0.625
+        },
+        {
+          "question": "Find the average salary of all employees",
+          "actual_sql": "SELECT AVG(salary) FROM employee;",
+          "predicted_sql": "SELECT AVG(salary) FROM employees;",
+          "exact_match": false,
+          "similarity_score": 0.6666666666666666
+        },
+        {
+          "question": "Get the highest paid employee",
+          "actual_sql": "SELECT * FROM employee ORDER BY salary DESC LIMIT 1;",
+          "predicted_sql": "```sql\nSELECT e.employee_name\nFROM employees e\nORDER BY e.salary DESC\nLIMIT 1;\n```",
+          "exact_match": false,
+          "similarity_score": 0.6153846153846154
+        },
+        {
+          "question": "Count the number of employees in each department",
+          "actual_sql": "SELECT department, COUNT(*) FROM employee GROUP BY department;",
+          "predicted_sql": "```sql\nSELECT department, COUNT(*) AS num_employees\nFROM employees\nGROUP BY department;\n```",
+          "exact_match": false,
+          "similarity_score": 0.5454545454545454
+        },
+        {
+          "question": "List all departments with their average employee salary",
+          "actual_sql": "SELECT department, AVG(salary) FROM employee GROUP BY department;",
+          "predicted_sql": "```sql\nSELECT d.department_name, AVG(e.salary) AS average_salary\nFROM departments d\nJOIN employees e ON d.department_id = e.department_id\nGROUP BY d.department_name;\n```",
+          "exact_match": false,
+          "similarity_score": 0.3157894736842105
+        },
+        {
+          "question": "Find employees who work in the IT department",
+          "actual_sql": "SELECT * FROM employee WHERE department = 'IT';",
+          "predicted_sql": "SELECT * FROM Employees WHERE Department = 'IT';",
+          "exact_match": false,
+          "similarity_score": 0.7142857142857143
+        },
+        {
+          "question": "Show the total salary expense for each department",
+          "actual_sql": "SELECT department, SUM(salary) FROM employee GROUP BY department;",
+          "predicted_sql": "```sql\nSELECT d.department_name, SUM(e.salary_expense) AS total_salary_expense\nFROM department d\nJOIN employee e ON d.department_id = e.department_id\nGROUP BY d.department_name;\n```",
+          "exact_match": false,
+          "similarity_score": 0.3888888888888889
+        }
+      ]
+    }
+  },
+  "trained_model": {
+    "name": "gemma3-nl2sql:latest",
+    "results": {
+      "exact_matches": 6,
+      "total_tests": 8,
+      "exact_match_accuracy": 0.75,
+      "average_similarity": 0.984375,
+      "predictions": [
+        {
+          "question": "List all employees.",
+          "actual_sql": "SELECT * FROM employee;",
+          "predicted_sql": "SELECT * FROM employee;",
+          "exact_match": true,
+          "similarity_score": 1.0
+        },
+        {
+          "question": "Show all employees with salary above 50000",
+          "actual_sql": "SELECT * FROM employee WHERE salary > 50000;",
+          "predicted_sql": "SELECT * FROM employee WHERE salary > 50000;",
+          "exact_match": true,
+          "similarity_score": 1.0
+        },
+        {
+          "question": "Find the average salary of all employees",
+          "actual_sql": "SELECT AVG(salary) FROM employee;",
+          "predicted_sql": "SELECT AVG(salary) FROM employee;",
+          "exact_match": true,
+          "similarity_score": 1.0
+        },
+        {
+          "question": "Get the highest paid employee",
+          "actual_sql": "SELECT * FROM employee ORDER BY salary DESC LIMIT 1;",
+          "predicted_sql": "SELECT * FROM employee ORDER BY salary DESC LIMIT 1",
+          "exact_match": false,
+          "similarity_score": 1.0
+        },
+        {
+          "question": "Count the number of employees in each department",
+          "actual_sql": "SELECT department, COUNT(*) FROM employee GROUP BY department;",
+          "predicted_sql": "SELECT department, COUNT(*) FROM employee GROUP BY department;",
+          "exact_match": true,
+          "similarity_score": 1.0
+        },
+        {
+          "question": "List all departments with their average employee salary",
+          "actual_sql": "SELECT department, AVG(salary) FROM employee GROUP BY department;",
+          "predicted_sql": "SELECT department, AVG(salary) FROM department GROUP BY department;",
+          "exact_match": false,
+          "similarity_score": 0.875
+        },
+        {
+          "question": "Find employees who work in the IT department",
+          "actual_sql": "SELECT * FROM employee WHERE department = 'IT';",
+          "predicted_sql": "SELECT * FROM employee WHERE department = 'IT';",
+          "exact_match": true,
+          "similarity_score": 1.0
+        },
+        {
+          "question": "Show the total salary expense for each department",
+          "actual_sql": "SELECT department, SUM(salary) FROM employee GROUP BY department;",
+          "predicted_sql": "SELECT department, SUM(salary) FROM employee GROUP BY department;",
+          "exact_match": true,
+          "similarity_score": 1.0
+        }
+      ]
+    }
+  },
+  "improvements": {
+    "exact_match": 0.75,
+    "semantic_similarity": 0.4504412619544198
+  }
+}

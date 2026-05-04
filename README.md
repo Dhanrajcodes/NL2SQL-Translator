@@ -5,10 +5,12 @@ This project converts natural language queries into SQL using the Gemma3 1B mode
 ## Research Contributions
 
 This project goes beyond a simple UI wrapper by implementing:
-1. **Schema-Aware Prompting**: Incorporating database schema information into model inputs
+1. **Schema-Aware Prompting**: Incorporating database schema information in model inputs
 2. **Few-Shot Learning**: Using examples to guide the model's SQL generation
 3. **Parameter-Efficient Fine-tuning**: QLoRA implementation for limited hardware
 4. **Comprehensive Evaluation**: Multiple metrics to assess performance
+5. **Dynamic Schema Extraction**: Automatically extracting schema information from uploaded databases
+6. **Contextual SQL Generation**: Using relationship mapping to improve JOIN operations
 
 ## Setup
 
@@ -33,6 +35,42 @@ Or run them separately:
 - Frontend: `streamlit run app/ui.py`
 - Backend: `python app/app.py`
 
+## Project Highlights
+
+### Dynamic Schema Extraction and Contextual SQL Generation
+A major enhancement to the system that enables automatic database schema extraction and contextual SQL generation. This feature allows users to upload their database files directly, and the system will:
+
+- Automatically detect and extract table structures
+- Identify primary keys, foreign keys, and relationships
+- Generate more accurate SQL queries based on actual schema information
+- Suggest appropriate JOIN operations based on table relationships
+
+### Model Comparison
+
+You can compare the performance of the base Gemma3 model with your trained model using the dedicated comparison script:
+
+```bash
+python scripts/model_comparison_test.py
+```
+
+This will generate a visual comparison graph (`model_comparison_results.png`) and save detailed results to `model_comparison_results.json`. See [Model Comparison Guide](docs/model_comparison_guide.md) for more details.
+
+## Using the Enhanced Schema Feature
+
+The new schema extraction feature can be accessed through the UI:
+
+1. **Upload Database File**: Use the file uploader to provide your database file (SQLite format)
+2. **Enter Natural Language Query**: Describe the SQL query you want to generate
+3. **Generate with Context**: The system will analyze your database schema and generate more accurate SQL
+
+Alternatively, you can use the API endpoint directly:
+
+```bash
+curl -X POST http://localhost:5000/translate_with_context \
+  -F "question=Show all employees and their department names" \
+  -F "db_file=@path/to/your/database.db"
+```
+
 ## Project Structure
 
 ```
@@ -43,9 +81,13 @@ NL2SQL/
 ├── models/              # Saved models (if any)
 ├── scripts/             # Utility and evaluation scripts
 ├── results/             # Evaluation results and metrics
+├── utils/               # Utility modules (new!)
+│   ├── schema_extractor.py      # Database schema extraction
+│   ├── relationship_mapper.py   # Table relationship analysis
+│   └── contextual_prompter.py   # Enhanced prompt generation
 ├── requirements.txt     # Python dependencies
 ├── README.md            # Project overview and instructions
-└── PROJECT_STRUCTURE.md # Project structure documentation
+└── run_project.py       # Main script to run the complete project
 ```
 
 ## Benchmark Datasets
@@ -117,7 +159,7 @@ These scripts will process the datasets into the required format for fine-tuning
 
 ## Fine-tuning for Better Performance
 
-For limited hardware like your GTX 1650, we recommend using the QLoRA fine-tuning approach:
+For limited hardware like our GTX 1650, we recommend using the QLoRA fine-tuning approach:
 
 1. **Install additional dependencies**:
    ```bash
@@ -197,6 +239,15 @@ For better results with complex queries, provide database schema information:
      }'
    ```
 
+## New Schema Extraction Feature
+
+The new dynamic schema extraction feature works as follows:
+
+1. **Automatic Schema Detection**: Upload your database file and the system automatically detects tables, columns, and relationships
+2. **Relationship Mapping**: Identifies foreign key relationships to suggest appropriate JOIN operations
+3. **Contextual Prompting**: Generates enhanced prompts with detailed schema information
+4. **Improved Accuracy**: Uses actual database structure to generate more accurate SQL queries
+
 ## Evaluation
 
 To evaluate the model performance:
@@ -230,9 +281,12 @@ The system is designed to work on limited hardware:
 This project demonstrates that meaningful NL2SQL enhancements can be achieved on consumer-grade hardware, making this technology accessible to organizations with constrained computational resources. The implementation shows that value can be added beyond simple UI wrapping through:
 
 1. **Advanced Prompt Engineering**: Schema-aware and few-shot learning techniques
-2. **Hardware-Optimized Fine-tuning**: QLoRA implementation for limited VRAM
-3. **Comprehensive Evaluation**: Multiple metrics to assess performance
-4. **Reproducible Research**: Complete documentation and code
+2. **Dynamic Schema Extraction**: Automatically analyzing database structures for improved accuracy
+3. **Relationship Mapping**: Understanding table relationships to suggest appropriate JOIN operations
+4. **Contextual Prompting**: Creating enhanced prompts based on actual database schemas
+5. **Hardware-Optimized Fine-tuning**: QLoRA implementation for limited VRAM
+6. **Comprehensive Evaluation**: Multiple metrics to assess performance
+7. **Reproducible Research**: Complete documentation and code
 
 ## Future Work
 
