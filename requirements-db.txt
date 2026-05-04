@@ -1,0 +1,14 @@
+# Optional drivers for external database execution.
+# Install only the drivers for the database you want to connect.
+
+# PostgreSQL
+psycopg[binary]>=3.1.0
+
+# MySQL / MariaDB
+pymysql>=1.1.0
+
+# SQL Server
+pyodbc>=5.0.0
+
+# Oracle
+oracledb>=2.0.0

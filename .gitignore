@@ -3,7 +3,7 @@
 venv/
 env/
 
-# Data files (which might contain sensitive information or are too large)
+# Raw dataset downloads (large files, not tracked)
 data/spider/
 data/wikisql/
 data/spider_test.json
@@ -15,11 +15,12 @@ data/wikisql_train.json
 logs/
 *.log
 
-# Model files (large binary files)
+# Trained model weights (large binary files)
 models/
 
-# Results files
+# Evaluation outputs
 results/
+evaluation_results.json
 
 # OS generated files
 .DS_Store
@@ -34,7 +35,7 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized files
 __pycache__/
 *.py[cod]
 *$py.class

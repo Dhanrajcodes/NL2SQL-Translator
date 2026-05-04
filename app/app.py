@@ -6,11 +6,11 @@ import tempfile
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import ollama
-import sqlite3
 import json
 from utils.schema_extractor import extract_schema_from_db, format_schema_for_prompt
 from utils.contextual_prompter import create_contextual_prompter_for_db
-from utils.relationship_mapper import create_relationship_mapper_for_db
+from utils.sql_runner import run_read_only_query
+from utils.db_connector import extract_schema_from_connection, run_read_only_connection_query
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -22,14 +22,29 @@ def get_request_data(req):
         return req.get_json(silent=True) or {}
     return req.form.to_dict(flat=True)
 
-def format_prompt_with_schema(nl_question, schema_info=None, examples=None):
+SUPPORTED_DIALECTS = {
+    "SQLite": "SQLite",
+    "PostgreSQL": "PostgreSQL",
+    "MySQL": "MySQL",
+    "SQL Server": "Microsoft SQL Server T-SQL",
+    "Oracle": "Oracle SQL",
+}
+
+
+def normalize_dialect(dialect):
+    return SUPPORTED_DIALECTS.get(dialect, "SQLite")
+
+
+def format_prompt_with_schema(nl_question, schema_info=None, examples=None, dialect="SQLite"):
     """
     Format the prompt with schema information if available
     """
+    sql_dialect = normalize_dialect(dialect)
     if schema_info:
         # Use the enhanced schema-aware prompt
         prompt = f"""
 You are an expert SQL generator that converts natural language questions into valid SQL queries.
+Generate {sql_dialect} syntax.
 Only output SQL code with no additional text or explanations.
 
 SCHEMA INFORMATION:
@@ -49,7 +64,8 @@ Natural Language: {nl_question}
 SQL:"""
     else:
         # Fallback to basic prompt
-        prompt = f"""You are an expert SQL generator. Convert the following natural language question to a valid SQL query.
+        prompt = f"""You are an expert SQL generator. Convert the following natural language question to a valid {sql_dialect} query.
+Only output SQL code with no additional text or explanations.
 
 Examples:
 Natural Language: Show all employees in the Sales department.
@@ -66,7 +82,7 @@ SQL:"""
     
     return prompt
 
-def generate_sql_with_ollama(question, schema_info=None, model_name="gemma3:1b"):
+def generate_sql_with_ollama(question, schema_info=None, model_name="gemma3:1b", dialect="SQLite"):
     """
     Generate SQL using Ollama with schema-enhanced prompting
     
@@ -80,7 +96,7 @@ def generate_sql_with_ollama(question, schema_info=None, model_name="gemma3:1b")
     """
     try:
         # Format the prompt with schema information if available
-        prompt = format_prompt_with_schema(question, schema_info)
+        prompt = format_prompt_with_schema(question, schema_info, dialect=dialect)
         
         # Generate response using Ollama
         response = ollama.generate(
@@ -128,6 +144,13 @@ def generate_sql_with_ollama(question, schema_info=None, model_name="gemma3:1b")
         print(f"Error generating SQL with Ollama: {e}")
         return "SELECT * FROM table_name WHERE condition;"
 
+def save_uploaded_database(db_file):
+    """Save an uploaded database to a temporary path and return the path."""
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.db')
+    os.close(temp_fd)
+    db_file.save(temp_path)
+    return temp_path
+
 @app.route('/translate', methods=['POST'])
 def translate_nl_to_sql():
     """
@@ -138,6 +161,7 @@ def translate_nl_to_sql():
         question = data.get('question', '')
         schema = data.get('schema', None)
         model_name = data.get('model', 'gemma3:1b')
+        dialect = data.get('dialect', 'SQLite')
         db_file = request.files.get('db_file')  # Added support for uploading DB file
 
         # In multipart requests, schema may arrive as a JSON string.
@@ -150,25 +174,23 @@ def translate_nl_to_sql():
         # Handle database file upload for schema extraction
         extracted_schema = None
         if db_file:
-            # Save uploaded file temporarily
-            temp_fd, temp_path = tempfile.mkstemp(suffix='.db')
+            temp_path = save_uploaded_database(db_file)
             try:
-                db_file.save(temp_path)
-                # Extract schema from uploaded database
                 extracted_schema = extract_schema_from_db(temp_path)
             finally:
-                os.close(temp_fd)
-                os.remove(temp_path)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
         
         # Use extracted schema if available, otherwise use provided schema
         final_schema = extracted_schema or schema
         
         # Generate SQL using Ollama with enhanced prompting
-        sql_result = generate_sql_with_ollama(question, final_schema, model_name)
+        sql_result = generate_sql_with_ollama(question, final_schema, model_name, dialect=dialect)
         
         return jsonify({
             'question': question,
             'sql': sql_result,
+            'dialect': normalize_dialect(dialect),
             'schema_used': bool(final_schema),
             'message': 'SQL generated successfully'
         })
@@ -177,6 +199,176 @@ def translate_nl_to_sql():
         return jsonify({
             'error': str(e)
         }), 500
+
+@app.route('/schema', methods=['POST'])
+def inspect_schema():
+    """Return schema information for an uploaded SQLite DB."""
+    try:
+        db_file = request.files.get('db_file')
+        if not db_file:
+            return jsonify({'error': 'SQLite database file is required'}), 400
+
+        temp_path = save_uploaded_database(db_file)
+        try:
+            schema = extract_schema_from_db(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return jsonify({'schema': schema})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/query', methods=['POST'])
+def generate_and_run_query():
+    """Generate SQL from a question and execute it against an uploaded SQLite DB."""
+    try:
+        data = get_request_data(request)
+        question = data.get('question', '')
+        model_name = data.get('model', 'gemma3:1b')
+        dialect = data.get('dialect', 'SQLite')
+        row_limit = int(data.get('row_limit', 100))
+        row_limit = max(1, min(row_limit, 500))
+        db_file = request.files.get('db_file')
+
+        if not question.strip():
+            return jsonify({'error': 'Question is required'}), 400
+
+        if not db_file:
+            return jsonify({'error': 'SQLite database file is required'}), 400
+
+        temp_path = save_uploaded_database(db_file)
+        try:
+            schema = extract_schema_from_db(temp_path)
+            sql_result = generate_sql_with_ollama(question, schema, model_name, dialect="SQLite")
+            execution = run_read_only_query(temp_path, sql_result, row_limit=row_limit)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return jsonify({
+            'question': question,
+            'sql': sql_result,
+            'dialect': 'SQLite',
+            'schema': schema,
+            'schema_used': True,
+            'execution': execution,
+            'message': 'SQL generated and executed successfully'
+        })
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/execute_sql', methods=['POST'])
+def execute_sql():
+    """Execute user-provided read-only SQL against an uploaded SQLite DB."""
+    try:
+        data = get_request_data(request)
+        sql = data.get('sql', '')
+        row_limit = int(data.get('row_limit', 100))
+        row_limit = max(1, min(row_limit, 500))
+        db_file = request.files.get('db_file')
+
+        if not sql.strip():
+            return jsonify({'error': 'SQL query is required'}), 400
+
+        if not db_file:
+            return jsonify({'error': 'SQLite database file is required'}), 400
+
+        temp_path = save_uploaded_database(db_file)
+        try:
+            execution = run_read_only_query(temp_path, sql, row_limit=row_limit)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return jsonify({
+            'sql': sql,
+            'dialect': 'SQLite',
+            'execution': execution,
+            'message': 'SQL executed successfully'
+        })
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/connection_schema', methods=['POST'])
+def inspect_connection_schema():
+    """Return schema information for an external database connection URL."""
+    try:
+        data = get_request_data(request)
+        connection_url = data.get('connection_url', '')
+
+        schema = extract_schema_from_connection(connection_url)
+        return jsonify({'schema': schema})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/query_connection', methods=['POST'])
+def generate_and_run_connection_query():
+    """Generate SQL and execute it against an external SQL database."""
+    try:
+        data = get_request_data(request)
+        question = data.get('question', '')
+        model_name = data.get('model', 'gemma3:1b')
+        dialect = data.get('dialect', 'SQLite')
+        connection_url = data.get('connection_url', '')
+        row_limit = int(data.get('row_limit', 100))
+        row_limit = max(1, min(row_limit, 500))
+
+        if not question.strip():
+            return jsonify({'error': 'Question is required'}), 400
+
+        schema = extract_schema_from_connection(connection_url)
+        sql_result = generate_sql_with_ollama(question, schema, model_name, dialect=dialect)
+        execution = run_read_only_connection_query(connection_url, sql_result, row_limit=row_limit)
+
+        return jsonify({
+            'question': question,
+            'sql': sql_result,
+            'dialect': execution.get('dialect', normalize_dialect(dialect)),
+            'schema': schema,
+            'schema_used': True,
+            'execution': execution,
+            'message': 'SQL generated and executed successfully'
+        })
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/execute_connection_sql', methods=['POST'])
+def execute_connection_sql():
+    """Execute user-provided read-only SQL against an external database."""
+    try:
+        data = get_request_data(request)
+        connection_url = data.get('connection_url', '')
+        sql = data.get('sql', '')
+        row_limit = int(data.get('row_limit', 100))
+        row_limit = max(1, min(row_limit, 500))
+
+        if not sql.strip():
+            return jsonify({'error': 'SQL query is required'}), 400
+
+        execution = run_read_only_connection_query(connection_url, sql, row_limit=row_limit)
+        return jsonify({
+            'sql': sql,
+            'dialect': execution.get('dialect'),
+            'execution': execution,
+            'message': 'SQL executed successfully'
+        })
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/translate_with_context', methods=['POST'])
 def translate_with_enhanced_context():
@@ -194,11 +386,8 @@ def translate_with_enhanced_context():
                 'error': 'Database file is required for contextual translation'
             }), 400
         
-        # Save uploaded file temporarily
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.db')
+        temp_path = save_uploaded_database(db_file)
         try:
-            db_file.save(temp_path)
-            
             # Create contextual prompter for the database
             prompter = create_contextual_prompter_for_db(temp_path)
             
@@ -239,8 +428,8 @@ def translate_with_enhanced_context():
                         sql_query += ';'
             
         finally:
-            os.close(temp_fd)
-            os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         
         return jsonify({
             'question': question,

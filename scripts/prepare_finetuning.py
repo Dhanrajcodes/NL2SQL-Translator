@@ -1,91 +1,74 @@
-"""
-Script to prepare data for fine-tuning Gemma model on NL2SQL task
-"""
+"""Prepare JSONL data for NL2SQL fine-tuning."""
 
 import json
-import os
+from pathlib import Path
 
-def load_training_data():
-    """
-    Load training data from Spider and WikiSQL datasets
-    """
-    training_examples = []
-    
-    # Check for Spider dataset
-    spider_train_path = 'data/spider_train.json'
-    if os.path.exists(spider_train_path):
-        with open(spider_train_path, 'r') as f:
-            spider_data = json.load(f)
-            training_examples.extend(spider_data)
-        print(f"Loaded {len(spider_data)} examples from Spider dataset")
-    
-    # Check for WikiSQL dataset
-    wikisql_train_path = 'data/wikisql_train.json'
-    if os.path.exists(wikisql_train_path):
-        with open(wikisql_train_path, 'r') as f:
-            wikisql_data = json.load(f)
-            training_examples.extend(wikisql_data)
-        print(f"Loaded {len(wikisql_data)} examples from WikiSQL dataset")
-    
-    # Add some sample data if no datasets are available
-    if not training_examples:
-        training_examples = [
-            {
-                "question": "Show all employees with salary above 50000",
-                "sql": "SELECT * FROM employee WHERE salary > 50000;"
-            },
-            {
-                "question": "List all departments",
-                "sql": "SELECT * FROM department;"
-            },
-            {
-                "question": "Find the average salary of all employees",
-                "sql": "SELECT AVG(salary) FROM employee;"
-            }
-        ]
-        print("Using sample training data")
-    
-    print(f"Total training examples: {len(training_examples)}")
-    return training_examples
 
-def create_finetuning_dataset(training_examples, output_file='data/finetuning_dataset.jsonl'):
-    """
-    Create a dataset for fine-tuning in the format expected by training scripts
-    """
-    print("Creating fine-tuning dataset...")
-    
-    with open(output_file, 'w') as f:
-        for example in training_examples:
-            # Format as JSONL for training
+DATA_DIR = Path("data")
+OUTPUT_FILE = DATA_DIR / "finetuning_dataset.jsonl"
+
+
+SAMPLE_EXAMPLES = [
+    {
+        "question": "Show all employees with salary above 50000",
+        "sql": "SELECT * FROM employee WHERE salary > 50000;",
+    },
+    {
+        "question": "List all departments",
+        "sql": "SELECT * FROM department;",
+    },
+    {
+        "question": "Find the average salary of all employees",
+        "sql": "SELECT AVG(salary) FROM employee;",
+    },
+    {
+        "question": "Count employees in each department",
+        "sql": "SELECT department, COUNT(*) FROM employee GROUP BY department;",
+    },
+]
+
+
+def load_examples() -> list[dict]:
+    examples = []
+
+    for file_name in ["spider_train.json", "wikisql_train.json"]:
+        path = DATA_DIR / file_name
+        if not path.exists():
+            continue
+
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+            examples.extend(data)
+        print(f"Loaded {len(data)} examples from {path}")
+
+    if not examples:
+        examples = SAMPLE_EXAMPLES
+        print("No processed dataset found. Using sample examples.")
+
+    return examples
+
+
+def write_jsonl(examples: list[dict], output_file: Path = OUTPUT_FILE) -> None:
+    output_file.parent.mkdir(exist_ok=True)
+
+    with output_file.open("w", encoding="utf-8") as file:
+        for example in examples:
             item = {
-                "text": f"Question: {example['question']}\nSQL: {example['sql']}"
+                "text": (
+                    "Convert the following natural language question to SQL.\n"
+                    f"Question: {example['question']}\n"
+                    f"SQL: {example['sql']}"
+                )
             }
-            f.write(json.dumps(item) + '\n')
-    
-    print(f"Fine-tuning dataset created: {output_file}")
-    return output_file
+            file.write(json.dumps(item) + "\n")
 
-def main():
-    print("NL2SQL Fine-tuning Data Preparation")
-    print("=" * 40)
-    
-    # Load training data
-    training_examples = load_training_data()
-    
-    # Create fine-tuning dataset
-    dataset_file = create_finetuning_dataset(training_examples)
-    
-    print("\nDataset preparation completed!")
-    print("\nTo fine-tune your Gemma model:")
-    print("1. For Hugging Face approach:")
-    print("   - Make sure you have access to the Gemma model on Hugging Face")
-    print("   - Authenticate with: huggingface-cli login")
-    print("   - Use a full fine-tuning script with QLoRA")
-    print("\n2. For Ollama approach:")
-    print("   - Use the Modelfile with the prepared dataset")
-    print("   - Run: ollama create gemma3-nl2sql -f Modelfile")
-    
-    print("\nYour dataset is ready for fine-tuning!")
+    print(f"Wrote {len(examples)} examples to {output_file}")
+
+
+def main() -> None:
+    examples = load_examples()
+    write_jsonl(examples)
+
 
 if __name__ == "__main__":
     main()

@@ -1,296 +1,227 @@
-# NL2SQL Project: Enhancing Gemma3 for Natural Language to SQL Translation
+# NL2SQL Studio
 
-This project converts natural language queries into SQL using the Gemma3 1B model via Ollama. Unlike simple UI wrappers, this implementation demonstrates significant enhancements through prompt engineering, schema-aware processing, and parameter-efficient fine-tuning techniques.
+A locally-hosted Natural Language to SQL translation system built with Flask, Streamlit, and Ollama. This project lets users type plain English questions and receive valid SQL queries, with optional live execution against real databases.
 
-## Research Contributions
+## What This Project Does
 
-This project goes beyond a simple UI wrapper by implementing:
-1. **Schema-Aware Prompting**: Incorporating database schema information in model inputs
-2. **Few-Shot Learning**: Using examples to guide the model's SQL generation
-3. **Parameter-Efficient Fine-tuning**: QLoRA implementation for limited hardware
-4. **Comprehensive Evaluation**: Multiple metrics to assess performance
-5. **Dynamic Schema Extraction**: Automatically extracting schema information from uploaded databases
-6. **Contextual SQL Generation**: Using relationship mapping to improve JOIN operations
+- Translates English questions into SQL using a locally running Ollama language model (Gemma 3 1B)
+- Supports multiple SQL dialects: SQLite, PostgreSQL, MySQL, SQL Server, and Oracle
+- Automatically extracts and uses database schema context for accurate query generation
+- Executes read-only queries safely on uploaded SQLite files or external database connections
+- Includes scripts for fine-tuning the model on NL2SQL datasets (Spider, WikiSQL)
+- Provides a clean web interface for the entire workflow
 
-## Setup
+## Prerequisites
 
-1. Install Ollama from https://ollama.com/
-2. Pull the Gemma3 1B model:
-   ```bash
-   ollama pull gemma3:1b
-   ```
-3. Install project dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+| Requirement       | Version | Notes                                |
+|-------------------|---------|--------------------------------------|
+| Python            | 3.10+   | Tested on 3.12 and 3.14              |
+| Ollama            | latest  | https://ollama.com/download          |
+| Git               | any     | For cloning                          |
 
-## Running the Project
+## Setup Instructions
 
-Start both frontend and backend:
+### 1. Clone the repository
+
+```bash
+git clone <repo-url>
+cd NL2SQL
+```
+
+### 2. Create a virtual environment
+
+**Windows (PowerShell):**
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**macOS / Linux:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install dependencies
+
+Core dependencies (required):
+
+```bash
+pip install -r requirements.txt
+```
+
+For connecting to external databases (PostgreSQL, MySQL, etc.):
+
+```bash
+pip install -r requirements-db.txt
+```
+
+For running the fine-tuning pipeline:
+
+```bash
+pip install -r requirements-finetune.txt
+```
+
+### 4. Install and set up Ollama
+
+1. Download and install Ollama from https://ollama.com/download
+2. Verify it is working:
+
+```bash
+ollama --version
+```
+
+3. Pull the base model:
+
+```bash
+ollama pull gemma3:1b
+```
+
+4. (Optional) Create a custom model variant with tuned system prompt:
+
+```bash
+ollama create gemma3-nl2sql -f Modelfile
+```
+
+## Running the Application
+
+The easiest way to start everything:
+
 ```bash
 python run_project.py
 ```
 
-Or run them separately:
-- Frontend: `streamlit run app/ui.py`
-- Backend: `python app/app.py`
+This starts both the Flask backend (port 5000) and the Streamlit frontend (port 8501) together.
 
-## Project Highlights
+**Alternatively**, start them in separate terminals:
 
-### Dynamic Schema Extraction and Contextual SQL Generation
-A major enhancement to the system that enables automatic database schema extraction and contextual SQL generation. This feature allows users to upload their database files directly, and the system will:
-
-- Automatically detect and extract table structures
-- Identify primary keys, foreign keys, and relationships
-- Generate more accurate SQL queries based on actual schema information
-- Suggest appropriate JOIN operations based on table relationships
-
-### Model Comparison
-
-You can compare the performance of the base Gemma3 model with your trained model using the dedicated comparison script:
+Terminal 1 — Backend:
 
 ```bash
-python scripts/model_comparison_test.py
+python -m app.app
 ```
 
-This will generate a visual comparison graph (`model_comparison_results.png`) and save detailed results to `model_comparison_results.json`. See [Model Comparison Guide](docs/model_comparison_guide.md) for more details.
-
-## Using the Enhanced Schema Feature
-
-The new schema extraction feature can be accessed through the UI:
-
-1. **Upload Database File**: Use the file uploader to provide your database file (SQLite format)
-2. **Enter Natural Language Query**: Describe the SQL query you want to generate
-3. **Generate with Context**: The system will analyze your database schema and generate more accurate SQL
-
-Alternatively, you can use the API endpoint directly:
+Terminal 2 — Frontend:
 
 ```bash
-curl -X POST http://localhost:5000/translate_with_context \
-  -F "question=Show all employees and their department names" \
-  -F "db_file=@path/to/your/database.db"
+streamlit run app/ui.py
 ```
 
-## Project Structure
+Once running, open http://localhost:8501 in your browser.
 
+## How to Use
+
+1. Select a model and SQL dialect in the sidebar
+2. Choose your database source:
+   - **SQLite file**: Upload a `.db` file directly
+   - **External connection**: Provide a SQLAlchemy connection URL
+3. Click **Inspect database** to extract and view the schema
+4. Go to the main area, type your English question
+5. Click **Generate SQL** for translation only, or **Generate & Execute** to run the query and see results
+
+## External Database Connection URL Formats
+
+| Database   | URL Format                                                                    |
+|------------|-------------------------------------------------------------------------------|
+| PostgreSQL | `postgresql+psycopg://user:password@host:5432/dbname`                        |
+| MySQL      | `mysql+pymysql://user:password@host:3306/dbname`                             |
+| SQL Server | `mssql+pyodbc://user:password@host:1433/dbname?driver=ODBC+Driver+17+for+SQL+Server` |
+| Oracle     | `oracle+oracledb://user:password@host:1521/?service_name=orclpdb1`           |
+
+Install the corresponding driver from `requirements-db.txt` before using these.
+
+## API Endpoints
+
+| Method | Route                    | Description                                    |
+|--------|--------------------------|------------------------------------------------|
+| POST   | `/translate`             | Translate NL question to SQL                   |
+| POST   | `/schema`                | Extract schema from uploaded SQLite file        |
+| POST   | `/query`                 | Generate SQL and execute on uploaded SQLite     |
+| POST   | `/execute_sql`           | Execute raw SQL on uploaded SQLite              |
+| POST   | `/connection_schema`     | Extract schema from external DB connection      |
+| POST   | `/query_connection`      | Generate SQL and execute on external DB         |
+| POST   | `/execute_connection_sql`| Execute raw SQL on external DB                  |
+| POST   | `/translate_with_context`| NL to SQL with enhanced contextual prompting    |
+| GET    | `/health`                | Health check                                   |
+
+## Fine-Tuning (Optional)
+
+This project includes scripts to fine-tune the base model using publicly available NL2SQL datasets.
+
+### Step 1 — Download datasets
+
+Follow the instructions printed by:
+
+```bash
+python scripts/download_datasets.py
 ```
-NL2SQL/
-├── app/                 # Application code (UI and API)
-├── data/                # Dataset files and processed data
-├── docs/                # Project documentation
-├── models/              # Saved models (if any)
-├── scripts/             # Utility and evaluation scripts
-├── results/             # Evaluation results and metrics
-├── utils/               # Utility modules (new!)
-│   ├── schema_extractor.py      # Database schema extraction
-│   ├── relationship_mapper.py   # Table relationship analysis
-│   └── contextual_prompter.py   # Enhanced prompt generation
-├── requirements.txt     # Python dependencies
-├── README.md            # Project overview and instructions
-└── run_project.py       # Main script to run the complete project
+
+Datasets used:
+- **Spider** — https://github.com/taoyds/spider
+- **WikiSQL** — https://github.com/salesforce/WikiSQL
+
+### Step 2 — Prepare training data
+
+```bash
+python scripts/prepare_finetuning.py
 ```
 
-## Benchmark Datasets
+This creates `data/finetuning_dataset.jsonl`.
 
-The most commonly used benchmark datasets for NL2SQL are:
+### Step 3 — Run fine-tuning
 
-### Spider Dataset (Most Popular for Research)
-- Covers multiple databases and complex queries
-- Official repository: https://github.com/taoyds/spider
-- Direct download link: https://drive.google.com/uc?export=download&id=1_AckYkinAnhqmRQtGsQgXuudkLZj6bUV
-- Contains 10,181 questions and 5,693 unique complex SQL queries across 200 databases
+```bash
+python scripts/finetune_with_datasets.py
+```
 
-### WikiSQL (Simpler, Good for Beginners)
-- Large dataset but mostly single-table queries
-- Official repository: https://github.com/salesforce/WikiSQL
-- Contains 80,654 training examples, 18,515 development examples, and 15,878 test examples
+The fine-tuned model is saved to `models/gemma-nl2sql-finetuned/`.
 
-### Spider2 (Newer Enterprise-Focused Dataset)
-- More complex enterprise-level workflows
-- Official repository: https://github.com/xlang-ai/Spider2
-- Contains real-world enterprise scenarios
-- More complex setup requirements
-
-**Note**: For this college project, we recommend using the original Spider dataset as it's more established and suitable for educational purposes. Spider2 is more complex and requires enterprise database access.
-
-## Downloading and Processing Datasets
-
-To download and process the real datasets:
-
-1. **Get detailed download instructions**:
-   ```bash
-   python scripts/download_real_datasets.py
-   ```
-
-2. **Manual Download Steps**:
-
-   **For Spider Dataset**:
-   ```bash
-   # Create directory
-   mkdir -p data/spider
-   
-   # Download manually from:
-   # https://drive.google.com/uc?export=download&id=1_AckYkinAnhqmRQtGsQgXuudkLZj6bUV
-   
-   # Extract to data/spider/
-   ```
-
-   **For WikiSQL Dataset**:
-   ```bash
-   # Create directory
-   mkdir -p data/wikisql
-   
-   # Download manually from the WikiSQL GitHub repository
-   # Extract to data/wikisql/
-   ```
-
-3. **Process Datasets**:
-   ```bash
-   python scripts/download_spider_original.py
-   python scripts/download_wikisql_proper.py
-   ```
-
-4. **Prepare data for fine-tuning**:
-   ```bash
-   python scripts/prepare_finetuning.py
-   ```
-
-These scripts will process the datasets into the required format for fine-tuning.
-
-## Fine-tuning for Better Performance
-
-For limited hardware like our GTX 1650, we recommend using the QLoRA fine-tuning approach:
-
-1. **Install additional dependencies**:
-   ```bash
-   pip install datasets accelerate bitsandbytes peft trl
-   ```
-
-2. **Prepare data for fine-tuning**:
-   ```bash
-   python scripts/prepare_finetuning.py
-   ```
-
-3. **Fine-tune Gemma3 model using QLoRA** (optimized for limited hardware):
-   ```bash
-   python scripts/finetune_with_datasets.py
-   ```
-
-This approach uses 4-bit quantization and LoRA adapters to significantly reduce memory requirements while still achieving good performance.
-
-If you have access to more powerful hardware and want to fine-tune the full model:
-
-1. **Register for access** to the Gemma model at https://huggingface.co/google/gemma-2b
-2. **Authenticate** with Hugging Face:
-   ```bash
-   huggingface-cli login
-   ```
-3. **Run full fine-tuning**:
-   ```bash
-   python scripts/finetune_with_datasets.py
-   ```
-
-## Ollama-based Enhancement
-
-For deployment with Ollama, you can create an enhanced model:
-
-1. **Prepare the dataset**:
-   ```bash
-   python scripts/prepare_finetuning.py
-   ```
-
-2. **Create a Modelfile**:
-   ```dockerfile
-   FROM gemma3:1b
-   
-   SYSTEM """You are an expert SQL generator that converts natural language questions into valid SQL queries. Only output SQL code."""
-   
-   PARAMETER temperature 0.2
-   PARAMETER top_p 0.9
-   
-   ADAPTER data/finetuning_dataset.jsonl
-   ```
-
-3. **Create enhanced model**:
-   ```bash
-   ollama create gemma3-nl2sql -f Modelfile
-   ```
-
-## Schema-Aware SQL Generation
-
-For better results with complex queries, provide database schema information:
-
-1. In the Streamlit UI, use the "Database Schema" expander to provide schema information
-2. In the API, include the schema in your request:
-   ```bash
-   curl -X POST http://localhost:5000/translate \
-     -H "Content-Type: application/json" \
-     -d '{
-       "question": "Show all employees with salary above 50000",
-       "schema": {
-         "employees": {
-           "columns": [
-             {"name": "id", "type": "INTEGER"},
-             {"name": "name", "type": "TEXT"},
-             {"name": "salary", "type": "INTEGER"}
-           ]
-         }
-       }
-     }'
-   ```
-
-## New Schema Extraction Feature
-
-The new dynamic schema extraction feature works as follows:
-
-1. **Automatic Schema Detection**: Upload your database file and the system automatically detects tables, columns, and relationships
-2. **Relationship Mapping**: Identifies foreign key relationships to suggest appropriate JOIN operations
-3. **Contextual Prompting**: Generates enhanced prompts with detailed schema information
-4. **Improved Accuracy**: Uses actual database structure to generate more accurate SQL queries
+> **Note:** Fine-tuning requires a GPU with sufficient VRAM. Reduce `per_device_train_batch_size` or `MAX_LENGTH` in the script if running on limited hardware.
 
 ## Evaluation
-
-To evaluate the model performance:
 
 ```bash
 python scripts/evaluate_model.py
 ```
 
-This will generate metrics including:
-- Exact Match Accuracy
-- BLEU Score
-- Execution Accuracy (planned)
+This runs the model against test examples and outputs exact-match accuracy and token overlap scores to `evaluation_results.json`.
 
-## Documentation
+## Project Structure
 
-The project includes comprehensive documentation:
-- [Methodology](docs/methodology.md): Detailed approach and techniques
-- [Architecture](docs/architecture.md): System design and components
-- [Timeline](docs/timeline.md): Project development schedule
-- [Research Paper Draft](docs/research_paper_draft.md): Academic paper draft
+```
+NL2SQL/
+├── app/
+│   ├── app.py               # Flask REST API (backend)
+│   └── ui.py                # Streamlit web interface (frontend)
+├── utils/
+│   ├── schema_extractor.py  # SQLite schema extraction
+│   ├── sql_runner.py        # Safe read-only query execution
+│   ├── db_connector.py      # External database connections (SQLAlchemy)
+│   ├── contextual_prompter.py  # Enhanced prompt construction
+│   └── relationship_mapper.py  # Foreign key / relationship detection
+├── scripts/
+│   ├── download_datasets.py     # Dataset download helper
+│   ├── prepare_finetuning.py    # JSONL preparation for fine-tuning
+│   ├── finetune_with_datasets.py # Fine-tuning script (HuggingFace Trainer)
+│   └── evaluate_model.py        # Model evaluation
+├── data/
+│   ├── sample.db                # Sample SQLite database for quick testing
+│   └── finetuning_dataset.jsonl # Prepared training data
+├── Modelfile                # Ollama custom model definition
+├── run_project.py           # One-command launcher (backend + frontend)
+├── requirements.txt         # Core runtime dependencies
+├── requirements-db.txt      # External database drivers
+└── requirements-finetune.txt # Fine-tuning dependencies
+```
 
-## Hardware Configuration
+## Troubleshooting
 
-The system is designed to work on limited hardware:
-- CPU: AMD Ryzen 5
-- RAM: 8GB
-- GPU: NVIDIA GTX 1650 (4GB VRAM)
-
-## Research Significance
-
-This project demonstrates that meaningful NL2SQL enhancements can be achieved on consumer-grade hardware, making this technology accessible to organizations with constrained computational resources. The implementation shows that value can be added beyond simple UI wrapping through:
-
-1. **Advanced Prompt Engineering**: Schema-aware and few-shot learning techniques
-2. **Dynamic Schema Extraction**: Automatically analyzing database structures for improved accuracy
-3. **Relationship Mapping**: Understanding table relationships to suggest appropriate JOIN operations
-4. **Contextual Prompting**: Creating enhanced prompts based on actual database schemas
-5. **Hardware-Optimized Fine-tuning**: QLoRA implementation for limited VRAM
-6. **Comprehensive Evaluation**: Multiple metrics to assess performance
-7. **Reproducible Research**: Complete documentation and code
-
-## Future Work
-
-1. Integration with larger models when hardware permits
-2. Execution-based validation by connecting to actual databases
-3. Active learning from user feedback
-4. Multi-dialect SQL support
+| Problem                        | Solution                                                    |
+|--------------------------------|-------------------------------------------------------------|
+| Backend not running            | Run `python run_project.py` or start Flask manually          |
+| Ollama timeout / errors        | Ensure Ollama service is running, verify with `ollama list`  |
+| External DB connection errors  | Check URL format, install matching driver, check credentials |
+| SQL blocked during execution   | Only read-only `SELECT` / `WITH` queries are allowed         |
+| Port 8501 already in use       | Stop any existing Streamlit process or use `--server.port`   |
