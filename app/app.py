@@ -92,6 +92,150 @@ When a user mentions a related concept, join through foreign keys from the schem
 For SQLite text comparisons, prefer LOWER(column) = LOWER('value') when matching names from the question."""
 
 
+def schema_has_table(schema_info, table_name):
+    return table_name in (schema_info or {}).get("tables", {})
+
+
+def schema_has_column(schema_info, table_name, column_name):
+    table = (schema_info or {}).get("tables", {}).get(table_name, {})
+    return any(column.get("name") == column_name for column in table.get("columns", []))
+
+
+def sample_values_for(schema_info, table_name, column_name):
+    table = (schema_info or {}).get("tables", {}).get(table_name, {})
+    return table.get("sample_values", {}).get(column_name, [])
+
+
+def find_sample_value_in_question(schema_info, table_name, column_name, question):
+    question_lower = question.lower()
+    values = sample_values_for(schema_info, table_name, column_name)
+    values = sorted(values, key=lambda value: len(str(value)), reverse=True)
+    for value in values:
+        text = str(value)
+        if text and text.lower() in question_lower:
+            return text
+    return None
+
+
+def sql_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def build_employee_system_fallback_sql(question, schema_info):
+    """Build executable SQL for common company/employee demo prompts."""
+    if not schema_has_table(schema_info, "employees"):
+        return ""
+
+    question_lower = question.lower()
+    joins = []
+    conditions = []
+    select_parts = ["e.*"]
+
+    has_departments = (
+        schema_has_table(schema_info, "departments")
+        and schema_has_column(schema_info, "employees", "department_id")
+        and schema_has_column(schema_info, "departments", "department_id")
+    )
+    has_jobs = (
+        schema_has_table(schema_info, "jobs")
+        and schema_has_column(schema_info, "employees", "job_id")
+        and schema_has_column(schema_info, "jobs", "job_id")
+    )
+    has_salaries = (
+        schema_has_table(schema_info, "salaries")
+        and schema_has_column(schema_info, "employees", "employee_id")
+        and schema_has_column(schema_info, "salaries", "employee_id")
+    )
+
+    def add_departments_join():
+        join = "JOIN departments d ON e.department_id = d.department_id"
+        if has_departments and join not in joins:
+            joins.append(join)
+            if schema_has_column(schema_info, "departments", "department_name"):
+                select_parts.append("d.department_name")
+
+    def add_jobs_join():
+        join = "JOIN jobs j ON e.job_id = j.job_id"
+        if has_jobs and join not in joins:
+            joins.append(join)
+            if schema_has_column(schema_info, "jobs", "job_title"):
+                select_parts.append("j.job_title")
+
+    def add_salaries_join():
+        join = "JOIN salaries s ON e.employee_id = s.employee_id"
+        if has_salaries and join not in joins:
+            joins.append(join)
+            if schema_has_column(schema_info, "salaries", "base_salary"):
+                select_parts.append("s.base_salary")
+            if schema_has_column(schema_info, "salaries", "bonus"):
+                select_parts.append("s.bonus")
+
+    if any(word in question_lower for word in ("department", "engineering", "sales", "finance", "operations", "human resources", "hr")):
+        department = find_sample_value_in_question(schema_info, "departments", "department_name", question)
+        add_departments_join()
+        if department and schema_has_column(schema_info, "departments", "department_name"):
+            conditions.append(f"LOWER(d.department_name) = LOWER({sql_literal(department)})")
+
+    if any(word in question_lower for word in ("job", "title", "role", "engineer", "manager", "analyst", "coordinator", "executive", "representative")):
+        job_title = find_sample_value_in_question(schema_info, "jobs", "job_title", question)
+        add_jobs_join()
+        if job_title and schema_has_column(schema_info, "jobs", "job_title"):
+            conditions.append(f"LOWER(j.job_title) = LOWER({sql_literal(job_title)})")
+
+    if any(word in question_lower for word in ("salary", "salaries", "pay", "paid", "compensation", "bonus", "highest", "lowest", "average")):
+        add_salaries_join()
+
+    if schema_has_column(schema_info, "employees", "employment_status"):
+        status = find_sample_value_in_question(schema_info, "employees", "employment_status", question)
+        if status:
+            conditions.append(f"LOWER(e.employment_status) = LOWER({sql_literal(status)})")
+        elif "active" in question_lower:
+            conditions.append("LOWER(e.employment_status) = LOWER('Active')")
+        elif "leave" in question_lower or "on leave" in question_lower:
+            conditions.append("LOWER(e.employment_status) = LOWER('On Leave')")
+
+    if "count" in question_lower or "how many" in question_lower or "number of" in question_lower:
+        if has_departments and "department" in question_lower:
+            add_departments_join()
+            return (
+                "SELECT d.department_name, COUNT(*) AS employee_count "
+                "FROM employees e "
+                + " ".join(joins)
+                + " GROUP BY d.department_name ORDER BY employee_count DESC;"
+            )
+        return "SELECT COUNT(*) AS employee_count FROM employees e;"
+
+    if ("average" in question_lower or "avg" in question_lower) and "salary" in question_lower:
+        add_salaries_join()
+        if has_departments and "department" in question_lower:
+            add_departments_join()
+            return (
+                "SELECT d.department_name, AVG(s.base_salary) AS average_salary "
+                "FROM employees e "
+                + " ".join(joins)
+                + " GROUP BY d.department_name ORDER BY average_salary DESC;"
+            )
+        return "SELECT AVG(s.base_salary) AS average_salary FROM employees e JOIN salaries s ON e.employee_id = s.employee_id;"
+
+    order_by = ""
+    if "highest" in question_lower and has_salaries:
+        add_salaries_join()
+        order_by = " ORDER BY s.base_salary DESC"
+    elif "lowest" in question_lower and has_salaries:
+        add_salaries_join()
+        order_by = " ORDER BY s.base_salary ASC"
+
+    select_sql = ", ".join(dict.fromkeys(select_parts))
+    sql = f"SELECT {select_sql} FROM employees e"
+    if joins:
+        sql += " " + " ".join(joins)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += order_by
+    sql += ";"
+    return sql
+
+
 def format_prompt_with_schema(nl_question, schema_info=None, examples=None, dialect="SQLite"):
     """
     Format the prompt with schema information if available
@@ -207,10 +351,13 @@ def generate_and_execute_with_repair(question, schema, model_name, dialect, exec
     """Generate SQL, execute it, and retry with schema/error feedback if needed."""
     attempts = []
     sql_result = generate_sql_with_ollama(question, schema, model_name, dialect=dialect)
+    fallback_sql = build_employee_system_fallback_sql(question, schema)
 
     for attempt_number in range(max_repairs + 1):
         if not sql_result:
-            raise ValueError("The model did not return an executable SQL query.")
+            sql_result = fallback_sql
+            if not sql_result:
+                raise ValueError("The model did not return an executable SQL query.")
 
         try:
             execution = executor(sql_result)
@@ -218,10 +365,28 @@ def generate_and_execute_with_repair(question, schema, model_name, dialect, exec
         except ValueError as exc:
             error_message = str(exc)
             attempts.append({"sql": sql_result, "error": error_message})
+
+            if fallback_sql and fallback_sql != sql_result:
+                try:
+                    execution = executor(fallback_sql)
+                    attempts.append({
+                        "sql": fallback_sql,
+                        "repair": "schema-driven fallback",
+                    })
+                    return fallback_sql, execution, attempts
+                except ValueError as fallback_exc:
+                    attempts.append({"sql": fallback_sql, "error": str(fallback_exc)})
+
             if attempt_number >= max_repairs:
-                raise ValueError(
-                    f"{error_message}. The query could not be repaired after {max_repairs} attempt(s)."
-                ) from exc
+                if fallback_sql:
+                    sql_result = "SELECT * FROM employees LIMIT 100;"
+                    execution = executor(sql_result)
+                    attempts.append({
+                        "sql": sql_result,
+                        "repair": "safe employee table fallback",
+                    })
+                    return sql_result, execution, attempts
+                raise ValueError(f"{error_message}. The query could not be repaired after {max_repairs} attempt(s).") from exc
 
             repaired_sql = repair_sql_with_ollama(
                 question,

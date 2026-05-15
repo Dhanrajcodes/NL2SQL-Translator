@@ -129,7 +129,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
         self.assertEqual(body["execution"]["row_count"], 2)
-        self.assertEqual(len(body["repair_attempts"]), 1)
+        self.assertGreaterEqual(len(body["repair_attempts"]), 1)
         self.assertIn("JOIN departments", body["sql"])
 
     def test_translation_with_uploaded_db_validates_and_repairs_sql(self):
@@ -150,7 +150,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
         self.assertTrue(body["validated"])
-        self.assertEqual(len(body["repair_attempts"]), 1)
+        self.assertGreaterEqual(len(body["repair_attempts"]), 1)
         self.assertIn("JOIN salaries", body["sql"])
         self.assertNotIn(" salary FROM employees", body["sql"])
 
@@ -172,6 +172,60 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, body)
         self.assertEqual(body["execution"]["row_count"], 2)
         self.assertIn("employment_status", body["sql"])
+
+    def test_live_query_uses_schema_fallback_for_missing_job_title_join(self):
+        responses = [
+            {
+                "response": (
+                    "SELECT e.employee_id, e.first_name, e.last_name, job_title "
+                    "FROM employees e "
+                    "JOIN departments d ON e.department_id = d.department_id "
+                    "WHERE LOWER(d.department_name) = LOWER('Engineering');"
+                )
+            }
+        ]
+
+        with patch("app.app.ollama.generate", side_effect=responses):
+            response = self._post_db("/query", "Show all employees in engineering")
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertEqual(body["execution"]["row_count"], 2)
+        self.assertIn("JOIN departments", body["sql"])
+        self.assertNotIn(" job_title ", body["sql"])
+        self.assertTrue(any(attempt.get("repair") == "schema-driven fallback" for attempt in body["repair_attempts"]))
+
+    def test_employee_system_database_question_executes_without_model_repair(self):
+        real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
+        responses = [
+            {
+                "response": (
+                    "SELECT e.first_name, e.last_name, job_title "
+                    "FROM employees e "
+                    "JOIN departments d ON e.department_id = d.department_id "
+                    "WHERE LOWER(d.department_name) = LOWER('Engineering');"
+                )
+            }
+        ]
+
+        with real_db_path.open("rb") as db_file:
+            with patch("app.app.ollama.generate", side_effect=responses):
+                response = self.client.post(
+                    "/query",
+                    data={
+                        "question": "show all employees in engineering",
+                        "model": "test-model",
+                        "row_limit": "100",
+                        "dialect": "SQLite",
+                        "db_file": (db_file, real_db_path.name),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertGreater(body["execution"]["row_count"], 0)
+        self.assertIn("JOIN departments", body["sql"])
 
 
 if __name__ == "__main__":

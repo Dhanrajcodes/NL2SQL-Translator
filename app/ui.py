@@ -690,14 +690,14 @@ def render_schema(schema: dict) -> None:
                     }
                     for column in columns
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
     relationships = schema.get("relationships", [])
     if relationships:
         st.markdown('<div class="section-title">Relationships</div>', unsafe_allow_html=True)
-        st.dataframe(relationships, use_container_width=True, hide_index=True)
+        st.dataframe(relationships, width="stretch", hide_index=True)
 
 
 def show_error_response(response) -> None:
@@ -769,7 +769,7 @@ with st.sidebar:
 
     row_limit = st.slider("Live result row limit", min_value=10, max_value=500, value=100, step=10)
 
-    if st.button("Inspect database", use_container_width=True):
+    if st.button("Inspect database", width="stretch"):
         if db_mode == "SQLite file" and uploaded_db is None:
             st.error("Upload a SQLite database first.")
         elif db_mode == "External connection" and not connection_url.strip():
@@ -792,7 +792,7 @@ with st.sidebar:
                     st.error(f"Schema inspection failed: {exc}")
 
     st.divider()
-    if st.button("Check backend", use_container_width=True):
+    if st.button("Check backend", width="stretch"):
         try:
             health = requests.get(f"{API_BASE_URL}/health", timeout=10)
             if health.status_code == 200:
@@ -861,7 +861,7 @@ with tab_translate:
                 placeholder='{"tables": {"employees": {"columns": [{"name": "id", "type": "INTEGER"}], "foreign_keys": [], "primary_key": ["id"]}}, "relationships": []}',
             )
 
-        if st.button("Generate SQL", type="primary", use_container_width=True):
+        if st.button("Generate SQL", type="primary", width="stretch"):
             if not question.strip():
                 st.error("Enter a natural language question.")
             else:
@@ -947,7 +947,7 @@ with tab_live:
             placeholder="Example: Show all employees with salary above 70000",
         )
 
-        if st.button("Generate and show live output", type="primary", use_container_width=True):
+        if st.button("Generate and show live output", type="primary", width="stretch"):
             if db_mode == "SQLite file" and uploaded_db is None:
                 st.error("Upload a SQLite database first.")
             elif db_mode == "External connection" and not connection_url.strip():
@@ -999,7 +999,7 @@ with tab_live:
             )
             rows = execution.get("rows", [])
             if rows:
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.dataframe(rows, width="stretch", hide_index=True)
             else:
                 st.info("The query ran successfully but returned no rows.")
         else:
@@ -1024,7 +1024,7 @@ with tab_live:
         placeholder="SELECT * FROM employees LIMIT 10;",
     )
 
-    if st.button("Run edited SQL", use_container_width=True):
+    if st.button("Run edited SQL", width="stretch"):
         if db_mode == "SQLite file" and uploaded_db is None:
             st.error("Upload a SQLite database first.")
         elif db_mode == "External connection" and not connection_url.strip():
@@ -1055,7 +1055,7 @@ with tab_live:
                         st.success(f"Returned {execution.get('row_count', 0)} rows.")
                         rows = execution.get("rows", [])
                         if rows:
-                            st.dataframe(rows, use_container_width=True, hide_index=True)
+                            st.dataframe(rows, width="stretch", hide_index=True)
                     else:
                         show_error_response(response)
                 except requests.exceptions.ConnectionError:
