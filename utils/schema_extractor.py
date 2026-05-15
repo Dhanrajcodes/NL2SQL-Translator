@@ -85,6 +85,41 @@ class SchemaExtractor:
         
         return tables
     
+    def _quote_identifier(self, identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    def _extract_sample_values(self, table_name: str, columns: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
+        """Collect a few distinct text-like values to improve NL term mapping."""
+        if self.db_type != "sqlite":
+            return {}
+
+        samples = {}
+        cursor = self.connection.cursor()
+        text_columns = [
+            col["name"]
+            for col in columns
+            if any(token in (col.get("type") or "").upper() for token in ("CHAR", "TEXT", "CLOB", "VARCHAR"))
+        ]
+
+        for column_name in text_columns[:8]:
+            try:
+                cursor.execute(
+                    f"""
+                    SELECT DISTINCT {self._quote_identifier(column_name)}
+                    FROM {self._quote_identifier(table_name)}
+                    WHERE {self._quote_identifier(column_name)} IS NOT NULL
+                      AND TRIM({self._quote_identifier(column_name)}) != ''
+                    LIMIT 8;
+                    """
+                )
+                values = [row[0] for row in cursor.fetchall()]
+                if values:
+                    samples[column_name] = values
+            except sqlite3.Error:
+                continue
+
+        return samples
+
     def _extract_table_schema(self, table_name: str) -> Dict[str, Any]:
         """
         Extract schema for a specific table
@@ -133,7 +168,8 @@ class SchemaExtractor:
             "name": table_name,
             "columns": columns,
             "foreign_keys": foreign_keys_formatted,
-            "primary_key": [col["name"] for col in columns if col["primary_key"]]
+            "primary_key": [col["name"] for col in columns if col["primary_key"]],
+            "sample_values": self._extract_sample_values(table_name, columns),
         }
         
         return table_schema
@@ -230,6 +266,13 @@ def format_schema_for_prompt(schema: Dict[str, Any]) -> str:
             formatted.append("Foreign Keys:")
             for fk in table_info["foreign_keys"]:
                 formatted.append(f"  - {fk['from_column']} -> {fk['to_table']}.{fk['to_column']}")
+
+        sample_values = table_info.get("sample_values") or {}
+        if sample_values:
+            formatted.append("Sample Values:")
+            for column_name, values in sample_values.items():
+                preview = ", ".join(repr(value) for value in values[:8])
+                formatted.append(f"  - {column_name}: {preview}")
     
     # Add relationship information
     if schema["relationships"]:

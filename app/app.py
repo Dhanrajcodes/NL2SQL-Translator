@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import ollama
 import json
+import re
 from utils.schema_extractor import extract_schema_from_db, format_schema_for_prompt
 from utils.contextual_prompter import create_contextual_prompter_for_db
 from utils.sql_runner import run_read_only_query
@@ -35,47 +36,88 @@ def normalize_dialect(dialect):
     return SUPPORTED_DIALECTS.get(dialect, "SQLite")
 
 
+def clean_sql_response(response_text):
+    """Extract one executable SQL statement from an LLM response."""
+    sql_query = (response_text or "").strip()
+
+    fenced_match = re.search(r"```(?:sql)?\s*(.*?)```", sql_query, flags=re.IGNORECASE | re.DOTALL)
+    if fenced_match:
+        sql_query = fenced_match.group(1).strip()
+
+    cleaned_lines = []
+    for line in sql_query.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith(("sql:", "query:", "answer:", "natural language:", "question:")):
+            stripped = stripped.split(":", 1)[1].strip()
+            if not stripped:
+                continue
+        if stripped.startswith(("--", "#")):
+            continue
+        cleaned_lines.append(stripped)
+
+    sql_query = " ".join(cleaned_lines).strip()
+
+    statement_match = re.search(r"\b(with|select)\b", sql_query, flags=re.IGNORECASE)
+    if statement_match:
+        sql_query = sql_query[statement_match.start():]
+
+    sql_query = sql_query.strip().rstrip(";")
+    if sql_query:
+        sql_query += ";"
+    return sql_query
+
+
+def schema_table_column_summary(schema_info):
+    if not schema_info:
+        return ""
+
+    lines = []
+    for table_name, table_info in schema_info.get("tables", {}).items():
+        columns = [column["name"] for column in table_info.get("columns", [])]
+        lines.append(f"- {table_name}: {', '.join(columns)}")
+    return "\n".join(lines)
+
+
+def build_schema_rules(schema_info, dialect):
+    sql_dialect = normalize_dialect(dialect)
+    if not schema_info:
+        return f"Generate {sql_dialect} syntax."
+
+    return f"""Generate {sql_dialect} syntax.
+Use only the tables and columns listed in the schema.
+Never invent columns such as department, industry, salary, name, or id unless those exact column names exist in the schema.
+When a user mentions a related concept, join through foreign keys from the schema. For example, if employees has department_id and departments has department_name, filter department names through a JOIN.
+For SQLite text comparisons, prefer LOWER(column) = LOWER('value') when matching names from the question."""
+
+
 def format_prompt_with_schema(nl_question, schema_info=None, examples=None, dialect="SQLite"):
     """
     Format the prompt with schema information if available
     """
     sql_dialect = normalize_dialect(dialect)
     if schema_info:
-        # Use the enhanced schema-aware prompt
         prompt = f"""
 You are an expert SQL generator that converts natural language questions into valid SQL queries.
-Generate {sql_dialect} syntax.
 Only output SQL code with no additional text or explanations.
+Return exactly one read-only SELECT query.
+
+RULES:
+{build_schema_rules(schema_info, dialect)}
 
 SCHEMA INFORMATION:
 {format_schema_for_prompt(schema_info)}
 
-EXAMPLES:
-Natural Language: Show all employees in the Sales department.
-SQL: SELECT * FROM employees WHERE department = 'Sales';
-
-Natural Language: List the names of students who scored more than 90.
-SQL: SELECT name FROM students WHERE score > 90;
-
-Natural Language: Find the total salary of all employees.
-SQL: SELECT SUM(salary) FROM employees;
+TABLE AND COLUMN SUMMARY:
+{schema_table_column_summary(schema_info)}
 
 Natural Language: {nl_question}
 SQL:"""
     else:
-        # Fallback to basic prompt
         prompt = f"""You are an expert SQL generator. Convert the following natural language question to a valid {sql_dialect} query.
 Only output SQL code with no additional text or explanations.
-
-Examples:
-Natural Language: Show all employees in the Sales department.
-SQL: SELECT * FROM employees WHERE department = 'Sales';
-
-Natural Language: List the names of students who scored more than 90.
-SQL: SELECT name FROM students WHERE score > 90;
-
-Natural Language: Find the total salary of all employees.
-SQL: SELECT SUM(salary) FROM employees;
+Return exactly one read-only SELECT query.
 
 Natural Language: {nl_question}
 SQL:"""
@@ -95,54 +137,103 @@ def generate_sql_with_ollama(question, schema_info=None, model_name="gemma3:1b",
         str: Generated SQL query
     """
     try:
-        # Format the prompt with schema information if available
         prompt = format_prompt_with_schema(question, schema_info, dialect=dialect)
-        
-        # Generate response using Ollama
+
         response = ollama.generate(
             model=model_name,
             prompt=prompt,
             options={
-                "temperature": 0.2,  # Low temperature for more deterministic results
+                "temperature": 0.05,
                 "top_p": 0.9,
-                "stop": ["\n\n", "Natural Language:", "Examples:", "SCHEMA INFORMATION:"]
+                "num_predict": 256,
+                "stop": ["Natural Language:", "Question:", "SCHEMA INFORMATION:"]
             }
         )
-        
-        # Extract and clean the SQL query
-        sql_query = response['response'].strip()
-        
-        # Remove markdown code blocks if present
-        if "```sql" in sql_query:
-            parts = sql_query.split("```sql")
-            if len(parts) > 1:
-                sql_part = parts[1].split("```")[0].strip()
-                sql_query = sql_part
-        elif sql_query.startswith("```"):
-            lines = sql_query.split("\n")
-            code_lines = [line for line in lines if not line.startswith("```")]
-            if code_lines:
-                sql_query = "\n".join(code_lines).strip()
-        
-        # Clean up extra whitespace
-        lines = [line.strip() for line in sql_query.split("\n") if line.strip()]
-        if lines:
-            sql_query = " ".join(lines)
-        
-        # Ensure it ends with semicolon
-        if sql_query and not sql_query.endswith(';'):
-            if any(keyword in sql_query.upper() for keyword in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH', 'CREATE', 'DROP']):
-                sql_query += ';'
-        
-        # Validate that we have a reasonable SQL query
+
+        sql_query = clean_sql_response(response.get('response', ''))
         if not sql_query or len(sql_query) < 10:
-            return "SELECT * FROM table_name WHERE condition;"
-            
+            raise ValueError("Model did not return a usable SQL query.")
+
         return sql_query
     
     except Exception as e:
         print(f"Error generating SQL with Ollama: {e}")
-        return "SELECT * FROM table_name WHERE condition;"
+        return ""
+
+
+def repair_sql_with_ollama(question, bad_sql, error_message, schema_info, model_name="gemma3:1b", dialect="SQLite"):
+    """Ask the model to repair SQL using the real execution error and schema."""
+    prompt = f"""
+You are repairing a read-only SQL query that failed during execution.
+Only output the corrected SQL query. No explanation.
+
+RULES:
+{build_schema_rules(schema_info, dialect)}
+The corrected SQL must use only real tables and columns from the schema.
+Do not repeat the same invalid SQL.
+
+SCHEMA INFORMATION:
+{format_schema_for_prompt(schema_info)}
+
+User question:
+{question}
+
+Failed SQL:
+{bad_sql}
+
+Execution error:
+{error_message}
+
+Corrected SQL:"""
+
+    try:
+        response = ollama.generate(
+            model=model_name,
+            prompt=prompt,
+            options={
+                "temperature": 0.0,
+                "top_p": 0.8,
+                "num_predict": 256,
+                "stop": ["User question:", "Failed SQL:", "Execution error:"]
+            }
+        )
+        return clean_sql_response(response.get("response", ""))
+    except Exception as e:
+        print(f"Error repairing SQL with Ollama: {e}")
+        return ""
+
+
+def generate_and_execute_with_repair(question, schema, model_name, dialect, executor, max_repairs=2):
+    """Generate SQL, execute it, and retry with schema/error feedback if needed."""
+    attempts = []
+    sql_result = generate_sql_with_ollama(question, schema, model_name, dialect=dialect)
+
+    for attempt_number in range(max_repairs + 1):
+        if not sql_result:
+            raise ValueError("The model did not return an executable SQL query.")
+
+        try:
+            execution = executor(sql_result)
+            return sql_result, execution, attempts
+        except ValueError as exc:
+            error_message = str(exc)
+            attempts.append({"sql": sql_result, "error": error_message})
+            if attempt_number >= max_repairs:
+                raise ValueError(
+                    f"{error_message}. The query could not be repaired after {max_repairs} attempt(s)."
+                ) from exc
+
+            repaired_sql = repair_sql_with_ollama(
+                question,
+                sql_result,
+                error_message,
+                schema,
+                model_name=model_name,
+                dialect=dialect,
+            )
+            if not repaired_sql or repaired_sql == sql_result:
+                raise ValueError(error_message) from exc
+            sql_result = repaired_sql
 
 def save_uploaded_database(db_file):
     """Save an uploaded database to a temporary path and return the path."""
@@ -173,10 +264,21 @@ def translate_nl_to_sql():
         
         # Handle database file upload for schema extraction
         extracted_schema = None
+        sql_result = None
+        attempts = []
+        validated = False
         if db_file:
             temp_path = save_uploaded_database(db_file)
             try:
                 extracted_schema = extract_schema_from_db(temp_path)
+                sql_result, _execution, attempts = generate_and_execute_with_repair(
+                    question,
+                    extracted_schema,
+                    model_name,
+                    dialect,
+                    lambda sql: run_read_only_query(temp_path, sql, row_limit=1),
+                )
+                validated = True
             finally:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -184,14 +286,16 @@ def translate_nl_to_sql():
         # Use extracted schema if available, otherwise use provided schema
         final_schema = extracted_schema or schema
         
-        # Generate SQL using Ollama with enhanced prompting
-        sql_result = generate_sql_with_ollama(question, final_schema, model_name, dialect=dialect)
+        if sql_result is None:
+            sql_result = generate_sql_with_ollama(question, final_schema, model_name, dialect=dialect)
         
         return jsonify({
             'question': question,
             'sql': sql_result,
             'dialect': normalize_dialect(dialect),
             'schema_used': bool(final_schema),
+            'validated': validated,
+            'repair_attempts': attempts,
             'message': 'SQL generated successfully'
         })
     
@@ -240,8 +344,13 @@ def generate_and_run_query():
         temp_path = save_uploaded_database(db_file)
         try:
             schema = extract_schema_from_db(temp_path)
-            sql_result = generate_sql_with_ollama(question, schema, model_name, dialect="SQLite")
-            execution = run_read_only_query(temp_path, sql_result, row_limit=row_limit)
+            sql_result, execution, attempts = generate_and_execute_with_repair(
+                question,
+                schema,
+                model_name,
+                "SQLite",
+                lambda sql: run_read_only_query(temp_path, sql, row_limit=row_limit),
+            )
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -253,6 +362,7 @@ def generate_and_run_query():
             'schema': schema,
             'schema_used': True,
             'execution': execution,
+            'repair_attempts': attempts,
             'message': 'SQL generated and executed successfully'
         })
 
@@ -326,8 +436,13 @@ def generate_and_run_connection_query():
             return jsonify({'error': 'Question is required'}), 400
 
         schema = extract_schema_from_connection(connection_url)
-        sql_result = generate_sql_with_ollama(question, schema, model_name, dialect=dialect)
-        execution = run_read_only_connection_query(connection_url, sql_result, row_limit=row_limit)
+        sql_result, execution, attempts = generate_and_execute_with_repair(
+            question,
+            schema,
+            model_name,
+            dialect,
+            lambda sql: run_read_only_connection_query(connection_url, sql, row_limit=row_limit),
+        )
 
         return jsonify({
             'question': question,
@@ -336,6 +451,7 @@ def generate_and_run_connection_query():
             'schema': schema,
             'schema_used': True,
             'execution': execution,
+            'repair_attempts': attempts,
             'message': 'SQL generated and executed successfully'
         })
 
