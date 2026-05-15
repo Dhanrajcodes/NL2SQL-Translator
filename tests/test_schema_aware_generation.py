@@ -256,6 +256,65 @@ class SchemaAwareGenerationTests(unittest.TestCase):
             body["execution"]["rows"],
         )
 
+    def test_department_with_most_employees_returns_department_aggregate(self):
+        real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
+        responses = [
+            {
+                "response": (
+                    "SELECT e.*, d.department_name FROM employees e "
+                    "JOIN departments d ON e.department_id = d.department_id;"
+                )
+            }
+        ]
+
+        with real_db_path.open("rb") as db_file:
+            with patch("app.app.ollama.generate", side_effect=responses):
+                response = self.client.post(
+                    "/query",
+                    data={
+                        "question": "Which department has the most employees?",
+                        "model": "test-model",
+                        "row_limit": "100",
+                        "dialect": "SQLite",
+                        "db_file": (db_file, real_db_path.name),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertIn("COUNT(e.employee_id) AS employee_count", body["sql"])
+        self.assertIn("FROM departments d", body["sql"])
+        self.assertEqual(body["execution"]["row_count"], 1)
+        self.assertIn("department_name", body["execution"]["columns"])
+        self.assertIn("employee_count", body["execution"]["columns"])
+        self.assertNotIn("email", body["execution"]["columns"])
+
+    def test_department_details_returns_department_table(self):
+        real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
+        responses = [{"response": "SELECT * FROM employees;"}]
+
+        with real_db_path.open("rb") as db_file:
+            with patch("app.app.ollama.generate", side_effect=responses):
+                response = self.client.post(
+                    "/query",
+                    data={
+                        "question": "Show department table details",
+                        "model": "test-model",
+                        "row_limit": "100",
+                        "dialect": "SQLite",
+                        "db_file": (db_file, real_db_path.name),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertEqual(body["sql"], "SELECT * FROM departments;")
+        self.assertEqual(body["execution"]["row_count"], 5)
+        self.assertIn("department_name", body["execution"]["columns"])
+        self.assertNotIn("email", body["execution"]["columns"])
+
 
 if __name__ == "__main__":
     unittest.main()

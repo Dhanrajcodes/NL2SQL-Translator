@@ -230,6 +230,44 @@ def build_employee_system_fallback_sql(question, schema_info):
             elif "in" in question_lower or "during" in question_lower:
                 conditions.append(f"e.hire_date >= '{year}-01-01' AND e.hire_date <= '{year}-12-31'")
 
+    department_table_intent = (
+        has_departments
+        and "department" in question_lower
+        and not any(word in question_lower for word in ("employee", "employees", "staff", "worker", "workers"))
+        and any(word in question_lower for word in ("show", "list", "display", "all", "details", "detail", "table"))
+    )
+    if department_table_intent:
+        return "SELECT * FROM departments;"
+
+    department_employee_count_intent = (
+        has_departments
+        and "department" in question_lower
+        and any(word in question_lower for word in ("employee", "employees", "staff", "worker", "workers"))
+        and any(phrase in question_lower for phrase in (
+            "most",
+            "least",
+            "highest",
+            "lowest",
+            "maximum",
+            "minimum",
+            "top",
+            "which",
+            "count",
+            "how many",
+            "number of",
+        ))
+    )
+    if department_employee_count_intent:
+        order_direction = "ASC" if any(word in question_lower for word in ("least", "lowest", "minimum")) else "DESC"
+        limit_clause = " LIMIT 1" if any(word in question_lower for word in ("most", "least", "highest", "lowest", "maximum", "minimum", "top", "which")) else ""
+        return (
+            "SELECT d.department_id, d.department_name, d.location, d.budget, COUNT(e.employee_id) AS employee_count "
+            "FROM departments d "
+            "LEFT JOIN employees e ON e.department_id = d.department_id "
+            "GROUP BY d.department_id, d.department_name, d.location, d.budget "
+            f"ORDER BY employee_count {order_direction}{limit_clause};"
+        )
+
     if "count" in question_lower or "how many" in question_lower or "number of" in question_lower:
         if has_departments and "department" in question_lower:
             add_departments_join()
