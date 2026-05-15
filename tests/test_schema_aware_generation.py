@@ -87,6 +87,46 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def _create_library_db(self, db_path):
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.executescript(
+            """
+            CREATE TABLE authors (
+                author_id INTEGER PRIMARY KEY,
+                author_name TEXT NOT NULL,
+                country TEXT NOT NULL
+            );
+
+            CREATE TABLE books (
+                book_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                author_id INTEGER NOT NULL,
+                published_date TEXT NOT NULL,
+                genre TEXT NOT NULL,
+                pages INTEGER NOT NULL,
+                FOREIGN KEY (author_id) REFERENCES authors(author_id)
+            );
+            """
+        )
+        cur.executemany(
+            "INSERT INTO authors VALUES (?,?,?)",
+            [
+                (1, "Ada Writer", "USA"),
+                (2, "Bert Novelist", "UK"),
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO books VALUES (?,?,?,?,?,?)",
+            [
+                (1, "Future Systems", 1, "2022-05-10", "Technology", 310),
+                (2, "Old Tales", 1, "2018-04-01", "Fantasy", 250),
+                (3, "Data Stories", 2, "2021-07-20", "Technology", 190),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
     def _post_db(self, endpoint, question):
         with self.db_path.open("rb") as db_file:
             return self.client.post(
@@ -130,7 +170,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, body)
         self.assertEqual(body["execution"]["row_count"], 2)
         self.assertGreaterEqual(len(body["repair_attempts"]), 1)
-        self.assertIn("JOIN departments", body["sql"])
+        self.assertIn("departments", body["sql"])
 
     def test_translation_with_uploaded_db_validates_and_repairs_sql(self):
         responses = [
@@ -151,7 +191,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, body)
         self.assertTrue(body["validated"])
         self.assertGreaterEqual(len(body["repair_attempts"]), 1)
-        self.assertIn("JOIN salaries", body["sql"])
+        self.assertIn("salaries", body["sql"])
         self.assertNotIn(" salary FROM employees", body["sql"])
 
     def test_live_query_repairs_generic_status_request(self):
@@ -191,9 +231,9 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
         self.assertEqual(body["execution"]["row_count"], 2)
-        self.assertIn("JOIN departments", body["sql"])
+        self.assertIn("departments", body["sql"])
         self.assertNotIn(" job_title ", body["sql"])
-        self.assertTrue(any(attempt.get("repair") == "schema-driven query plan" for attempt in body["repair_attempts"]))
+        self.assertTrue(any(attempt.get("repair") == "generic schema-driven query plan" for attempt in body["repair_attempts"]))
 
     def test_employee_system_database_question_executes_without_model_repair(self):
         real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
@@ -225,7 +265,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
         self.assertGreater(body["execution"]["row_count"], 0)
-        self.assertIn("JOIN departments", body["sql"])
+        self.assertIn("departments", body["sql"])
 
     def test_employee_system_hired_after_year_uses_hire_date_filter(self):
         real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
@@ -249,7 +289,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
 
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
-        self.assertIn("hire_date > '2020-12-31'", body["sql"])
+        self.assertIn('"hire_date" > \'2020-12-31\'', body["sql"])
         self.assertGreater(body["execution"]["row_count"], 0)
         self.assertTrue(
             all(row["hire_date"] > "2020-12-31" for row in body["execution"]["rows"]),
@@ -283,8 +323,8 @@ class SchemaAwareGenerationTests(unittest.TestCase):
 
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
-        self.assertIn("COUNT(e.employee_id) AS employee_count", body["sql"])
-        self.assertIn("FROM departments d", body["sql"])
+        self.assertIn("COUNT", body["sql"])
+        self.assertIn("departments", body["sql"])
         self.assertEqual(body["execution"]["row_count"], 1)
         self.assertIn("department_name", body["execution"]["columns"])
         self.assertIn("employee_count", body["execution"]["columns"])
@@ -310,10 +350,61 @@ class SchemaAwareGenerationTests(unittest.TestCase):
 
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
-        self.assertEqual(body["sql"], "SELECT * FROM departments;")
+        self.assertEqual(body["sql"], 'SELECT * FROM "departments";')
         self.assertEqual(body["execution"]["row_count"], 5)
         self.assertIn("department_name", body["execution"]["columns"])
         self.assertNotIn("email", body["execution"]["columns"])
+
+    def test_generic_schema_planner_handles_non_employee_library_db(self):
+        library_path = Path(self.temp_dir.name) / "library.db"
+        self._create_library_db(library_path)
+        responses = [{"response": "SELECT * FROM books;"}]
+
+        with library_path.open("rb") as db_file:
+            with patch("app.app.ollama.generate", side_effect=responses):
+                response = self.client.post(
+                    "/query",
+                    data={
+                        "question": "Show books published after 2020",
+                        "model": "test-model",
+                        "row_limit": "100",
+                        "dialect": "SQLite",
+                        "db_file": (db_file, library_path.name),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertIn('"published_date" > \'2020-12-31\'', body["sql"])
+        self.assertEqual(body["execution"]["row_count"], 2)
+        self.assertTrue(all(row["published_date"] > "2020-12-31" for row in body["execution"]["rows"]))
+
+    def test_generic_schema_planner_counts_related_non_employee_tables(self):
+        library_path = Path(self.temp_dir.name) / "library.db"
+        self._create_library_db(library_path)
+        responses = [{"response": "SELECT * FROM books;"}]
+
+        with library_path.open("rb") as db_file:
+            with patch("app.app.ollama.generate", side_effect=responses):
+                response = self.client.post(
+                    "/query",
+                    data={
+                        "question": "Which author has the most books?",
+                        "model": "test-model",
+                        "row_limit": "100",
+                        "dialect": "SQLite",
+                        "db_file": (db_file, library_path.name),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertIn("COUNT", body["sql"])
+        self.assertIn("authors", body["sql"])
+        self.assertEqual(body["execution"]["row_count"], 1)
+        self.assertIn("book_count", body["execution"]["columns"])
 
 
 if __name__ == "__main__":

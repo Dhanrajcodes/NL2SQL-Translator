@@ -88,7 +88,9 @@ def build_schema_rules(schema_info, dialect):
     return f"""Generate {sql_dialect} syntax.
 Use only the tables and columns listed in the schema.
 Never invent columns such as department, industry, salary, name, or id unless those exact column names exist in the schema.
-When a user mentions a related concept, join through foreign keys from the schema. For example, if employees has department_id and departments has department_name, filter department names through a JOIN.
+When a user mentions a related concept, join through foreign keys from the schema instead of inventing a column on the main table.
+If the user asks for a table's details, select from that table directly.
+If the user asks which group has the most/least related rows, use GROUP BY with COUNT over the foreign-key relationship.
 For SQLite text comparisons, prefer LOWER(column) = LOWER('value') when matching names from the question."""
 
 
@@ -128,186 +130,333 @@ def extract_year(question):
     return int(match.group(1))
 
 
-def is_specific_employee_fallback(question, fallback_sql):
-    if not fallback_sql:
-        return False
+def singularize(word):
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith("ses") and len(word) > 4:
+        return word[:-2]
+    if word.endswith("s") and len(word) > 3:
+        return word[:-1]
+    return word
 
+
+def name_tokens(name):
+    return {singularize(token) for token in re.findall(r"[a-zA-Z0-9]+", name.lower()) if token}
+
+
+def question_tokens(question):
+    return {singularize(token) for token in re.findall(r"[a-zA-Z0-9]+", question.lower()) if token}
+
+
+def quote_identifier(identifier):
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def column_names(schema_info, table_name):
+    table = (schema_info or {}).get("tables", {}).get(table_name, {})
+    return [column.get("name") for column in table.get("columns", [])]
+
+
+def primary_key_for(schema_info, table_name):
+    primary_keys = (schema_info or {}).get("tables", {}).get(table_name, {}).get("primary_key", [])
+    if primary_keys:
+        return primary_keys[0]
+    columns = column_names(schema_info, table_name)
+    return columns[0] if columns else "*"
+
+
+def is_text_column(schema_info, table_name, column_name):
+    table = (schema_info or {}).get("tables", {}).get(table_name, {})
+    for column in table.get("columns", []):
+        if column.get("name") == column_name:
+            col_type = (column.get("type") or "").upper()
+            return any(token in col_type for token in ("CHAR", "TEXT", "CLOB", "VARCHAR"))
+    return False
+
+
+def is_date_like_column(column_name):
+    tokens = name_tokens(column_name)
+    return bool(tokens & {"date", "time", "year", "created", "updated", "joined", "hire", "start", "end", "birth"})
+
+
+def is_numeric_column(schema_info, table_name, column_name):
+    table = (schema_info or {}).get("tables", {}).get(table_name, {})
+    for column in table.get("columns", []):
+        if column.get("name") == column_name:
+            col_type = (column.get("type") or "").upper()
+            return any(token in col_type for token in ("INT", "REAL", "NUM", "DEC", "DOUBLE", "FLOAT"))
+    return False
+
+
+def score_table_for_question(schema_info, table_name, question):
+    tokens = question_tokens(question)
+    score = 0
+    table_tokens = name_tokens(table_name)
+    score += 5 * len(tokens & table_tokens)
+    for column_name in column_names(schema_info, table_name):
+        score += 2 * len(tokens & name_tokens(column_name))
+        for value in sample_values_for(schema_info, table_name, column_name):
+            value_text = str(value).lower()
+            if value_text and value_text in question.lower():
+                score += 4
+    return score
+
+
+def ranked_tables(schema_info, question):
+    tables = list((schema_info or {}).get("tables", {}).keys())
+    return sorted(tables, key=lambda table: score_table_for_question(schema_info, table, question), reverse=True)
+
+
+def relationship_edges(schema_info):
+    edges = []
+    for rel in (schema_info or {}).get("relationships", []):
+        from_table = rel.get("from_table")
+        to_table = rel.get("to_table")
+        from_column = rel.get("from_column")
+        to_column = rel.get("to_column")
+        if not all((from_table, to_table, from_column, to_column)):
+            continue
+        edges.append((from_table, to_table, from_column, to_column))
+        edges.append((to_table, from_table, to_column, from_column))
+    return edges
+
+
+def find_join_path(schema_info, start_table, end_table):
+    if start_table == end_table:
+        return []
+
+    edges = relationship_edges(schema_info)
+    queue = [(start_table, [])]
+    visited = {start_table}
+    while queue:
+        current, path = queue.pop(0)
+        for from_table, to_table, from_column, to_column in edges:
+            if from_table != current or to_table in visited:
+                continue
+            next_path = path + [(from_table, to_table, from_column, to_column)]
+            if to_table == end_table:
+                return next_path
+            visited.add(to_table)
+            queue.append((to_table, next_path))
+    return []
+
+
+def tables_reachable_from(schema_info, start_table):
+    reachable = {start_table}
+    for table_name in (schema_info or {}).get("tables", {}):
+        if table_name != start_table and find_join_path(schema_info, start_table, table_name):
+            reachable.add(table_name)
+    return reachable
+
+
+def mentioned_tables(schema_info, question):
+    tokens = question_tokens(question)
+    matches = []
+    for table_name in (schema_info or {}).get("tables", {}):
+        table_tokens = name_tokens(table_name)
+        if table_tokens and (table_tokens <= tokens or (len(table_tokens) == 1 and tokens & table_tokens)):
+            matches.append(table_name)
+    return matches
+
+
+def values_mentioned(schema_info, question, allowed_tables=None):
     question_lower = question.lower()
-    specific_terms = (
-        "after", "before", "since", "from", "in ",
-        "department", "engineering", "sales", "finance", "operations", "human resources", "hr",
-        "job", "title", "role", "engineer", "manager", "analyst", "coordinator", "executive", "representative",
-        "salary", "salaries", "pay", "compensation", "bonus", "highest", "lowest", "average",
-        "active", "leave", "status", "count", "how many", "number of", "hired", "hire date", "joined", "joining",
-    )
-    return " WHERE " in fallback_sql or " GROUP BY " in fallback_sql or " ORDER BY " in fallback_sql or any(
-        term in question_lower for term in specific_terms
-    )
+    matches = []
+    for table_name, table_info in (schema_info or {}).get("tables", {}).items():
+        if allowed_tables is not None and table_name not in allowed_tables:
+            continue
+        for column_name, values in (table_info.get("sample_values") or {}).items():
+            for value in sorted(values, key=lambda item: len(str(item)), reverse=True):
+                value_text = str(value)
+                if value_text and value_text.lower() in question_lower:
+                    matches.append((table_name, column_name, value_text))
+                    break
+    return matches
 
 
-def build_employee_system_fallback_sql(question, schema_info):
-    """Build executable SQL for common company/employee demo prompts."""
-    if not schema_has_table(schema_info, "employees"):
+def best_date_column(schema_info, table_name, question):
+    tokens = question_tokens(question)
+    candidates = []
+    for column_name in column_names(schema_info, table_name):
+        if not is_date_like_column(column_name):
+            continue
+        score = len(tokens & name_tokens(column_name))
+        if any(word in tokens for word in ("hire", "hired", "joined", "joining", "start", "started")) and name_tokens(column_name) & {"hire", "joined", "start"}:
+            score += 4
+        if any(word in tokens for word in ("created", "create")) and "created" in name_tokens(column_name):
+            score += 4
+        candidates.append((score, column_name))
+    if not candidates:
+        return None
+    return sorted(candidates, reverse=True)[0][1]
+
+
+def best_numeric_column(schema_info, table_name, question):
+    tokens = question_tokens(question)
+    candidates = []
+    for column_name in column_names(schema_info, table_name):
+        if not is_numeric_column(schema_info, table_name, column_name):
+            continue
+        if column_name in (primary_key_for(schema_info, table_name),):
+            continue
+        score = len(tokens & name_tokens(column_name))
+        candidates.append((score, column_name))
+    if not candidates:
+        return None
+    return sorted(candidates, reverse=True)[0][1]
+
+
+def build_aliases(tables):
+    aliases = {}
+    used = set()
+    for index, table_name in enumerate(tables):
+        base = singularize(table_name)[0].lower() if table_name else "t"
+        alias = base
+        if alias in used:
+            alias = f"t{index}"
+        used.add(alias)
+        aliases[table_name] = alias
+    return aliases
+
+
+def join_sql_for_tables(schema_info, base_table, needed_tables, aliases):
+    joins = []
+    joined = {base_table}
+    for table_name in needed_tables:
+        if table_name == base_table or table_name in joined:
+            continue
+        path = find_join_path(schema_info, base_table, table_name)
+        for from_table, to_table, from_column, to_column in path:
+            if to_table in joined:
+                continue
+            joins.append(
+                f"LEFT JOIN {quote_identifier(to_table)} {aliases[to_table]} "
+                f"ON {aliases[from_table]}.{quote_identifier(from_column)} = {aliases[to_table]}.{quote_identifier(to_column)}"
+            )
+            joined.add(to_table)
+    return joins
+
+
+def build_generic_schema_plan(question, schema_info):
+    """Create a schema-driven SQL plan without assuming a specific domain."""
+    tables = list((schema_info or {}).get("tables", {}).keys())
+    if not tables:
         return ""
 
     question_lower = question.lower()
-    joins = []
+    ranked = ranked_tables(schema_info, question)
+    mentioned = mentioned_tables(schema_info, question)
+    aggregate_terms = ("most", "least", "highest", "lowest", "maximum", "minimum", "top", "count", "how many", "number of")
+    wants_aggregate = any(term in question_lower for term in aggregate_terms)
+
+    if mentioned and not wants_aggregate and any(term in question_lower for term in ("table", "details", "detail", "schema")):
+        return f"SELECT * FROM {quote_identifier(mentioned[0])};"
+
+    if len(mentioned) >= 2 and wants_aggregate:
+        group_table = mentioned[0]
+        count_table = mentioned[1]
+        path = find_join_path(schema_info, group_table, count_table)
+        if path:
+            all_tables = [group_table] + [step[1] for step in path]
+            aliases = build_aliases(all_tables)
+            count_pk = primary_key_for(schema_info, count_table)
+            group_columns = column_names(schema_info, group_table)[:4]
+            select_columns = [f"{aliases[group_table]}.{quote_identifier(column)}" for column in group_columns]
+            joins = join_sql_for_tables(schema_info, group_table, [count_table], aliases)
+            direction = "ASC" if any(term in question_lower for term in ("least", "lowest", "minimum")) else "DESC"
+            limit = " LIMIT 1" if any(term in question_lower for term in ("most", "least", "highest", "lowest", "maximum", "minimum", "top", "which")) else ""
+            return (
+                "SELECT "
+                + ", ".join(select_columns)
+                + f", COUNT({aliases[count_table]}.{quote_identifier(count_pk)}) AS {singularize(count_table)}_count "
+                + f"FROM {quote_identifier(group_table)} {aliases[group_table]} "
+                + " ".join(joins)
+                + " GROUP BY "
+                + ", ".join(select_columns)
+                + f" ORDER BY {singularize(count_table)}_count {direction}{limit};"
+            )
+
+    base_table = mentioned[0] if mentioned else ranked[0]
+    reachable = tables_reachable_from(schema_info, base_table)
+    value_matches = values_mentioned(schema_info, question, reachable)
+    needed_tables = {base_table}
+    for table_name in mentioned:
+        if table_name in reachable:
+            needed_tables.add(table_name)
     conditions = []
-    select_parts = ["e.*"]
+    for table_name, column_name, value in value_matches:
+        needed_tables.add(table_name)
+        comparison = f"{quote_identifier(column_name)} = {sql_literal(value)}"
+        if is_text_column(schema_info, table_name, column_name):
+            comparison = f"LOWER({{alias}}.{quote_identifier(column_name)}) = LOWER({sql_literal(value)})"
+        conditions.append((table_name, comparison))
 
-    has_departments = (
-        schema_has_table(schema_info, "departments")
-        and schema_has_column(schema_info, "employees", "department_id")
-        and schema_has_column(schema_info, "departments", "department_id")
-    )
-    has_jobs = (
-        schema_has_table(schema_info, "jobs")
-        and schema_has_column(schema_info, "employees", "job_id")
-        and schema_has_column(schema_info, "jobs", "job_id")
-    )
-    has_salaries = (
-        schema_has_table(schema_info, "salaries")
-        and schema_has_column(schema_info, "employees", "employee_id")
-        and schema_has_column(schema_info, "salaries", "employee_id")
-    )
-
-    def add_departments_join():
-        join = "JOIN departments d ON e.department_id = d.department_id"
-        if has_departments and join not in joins:
-            joins.append(join)
-            if schema_has_column(schema_info, "departments", "department_name"):
-                select_parts.append("d.department_name")
-
-    def add_jobs_join():
-        join = "JOIN jobs j ON e.job_id = j.job_id"
-        if has_jobs and join not in joins:
-            joins.append(join)
-            if schema_has_column(schema_info, "jobs", "job_title"):
-                select_parts.append("j.job_title")
-
-    def add_salaries_join():
-        join = "JOIN salaries s ON e.employee_id = s.employee_id"
-        if has_salaries and join not in joins:
-            joins.append(join)
-            if schema_has_column(schema_info, "salaries", "base_salary"):
-                select_parts.append("s.base_salary")
-            if schema_has_column(schema_info, "salaries", "bonus"):
-                select_parts.append("s.bonus")
-
-    if any(word in question_lower for word in ("department", "engineering", "sales", "finance", "operations", "human resources", "hr")):
-        department = find_sample_value_in_question(schema_info, "departments", "department_name", question)
-        add_departments_join()
-        if department and schema_has_column(schema_info, "departments", "department_name"):
-            conditions.append(f"LOWER(d.department_name) = LOWER({sql_literal(department)})")
-
-    if any(word in question_lower for word in ("job", "title", "role", "engineer", "manager", "analyst", "coordinator", "executive", "representative")):
-        job_title = find_sample_value_in_question(schema_info, "jobs", "job_title", question)
-        add_jobs_join()
-        if job_title and schema_has_column(schema_info, "jobs", "job_title"):
-            conditions.append(f"LOWER(j.job_title) = LOWER({sql_literal(job_title)})")
-
-    if any(word in question_lower for word in ("salary", "salaries", "pay", "paid", "compensation", "bonus", "highest", "lowest", "average")):
-        add_salaries_join()
-
-    if schema_has_column(schema_info, "employees", "employment_status"):
-        status = find_sample_value_in_question(schema_info, "employees", "employment_status", question)
-        if status:
-            conditions.append(f"LOWER(e.employment_status) = LOWER({sql_literal(status)})")
-        elif "active" in question_lower:
-            conditions.append("LOWER(e.employment_status) = LOWER('Active')")
-        elif "leave" in question_lower or "on leave" in question_lower:
-            conditions.append("LOWER(e.employment_status) = LOWER('On Leave')")
-
-    if schema_has_column(schema_info, "employees", "hire_date") and any(
-        word in question_lower for word in ("hire", "hired", "joining", "joined", "start date", "started")
-    ):
-        year = extract_year(question)
-        if year:
+    year = extract_year(question)
+    if year:
+        date_column = best_date_column(schema_info, base_table, question)
+        if date_column:
             if "after" in question_lower or "since" in question_lower:
-                conditions.append(f"e.hire_date > '{year}-12-31'")
+                conditions.append((base_table, f"{{alias}}.{quote_identifier(date_column)} > '{year}-12-31'"))
             elif "before" in question_lower:
-                conditions.append(f"e.hire_date < '{year}-01-01'")
+                conditions.append((base_table, f"{{alias}}.{quote_identifier(date_column)} < '{year}-01-01'"))
             elif "in" in question_lower or "during" in question_lower:
-                conditions.append(f"e.hire_date >= '{year}-01-01' AND e.hire_date <= '{year}-12-31'")
+                conditions.append((base_table, f"{{alias}}.{quote_identifier(date_column)} >= '{year}-01-01' AND {{alias}}.{quote_identifier(date_column)} <= '{year}-12-31'"))
 
-    department_table_intent = (
-        has_departments
-        and "department" in question_lower
-        and not any(word in question_lower for word in ("employee", "employees", "staff", "worker", "workers"))
-        and any(word in question_lower for word in ("show", "list", "display", "all", "details", "detail", "table"))
-    )
-    if department_table_intent:
-        return "SELECT * FROM departments;"
+    numeric_column = best_numeric_column(schema_info, base_table, question)
+    if wants_aggregate and ("count" in question_lower or "how many" in question_lower or "number of" in question_lower):
+        return f"SELECT COUNT(*) AS row_count FROM {quote_identifier(base_table)};"
+    if numeric_column and any(term in question_lower for term in ("average", "avg")):
+        return f"SELECT AVG({quote_identifier(numeric_column)}) AS average_{numeric_column} FROM {quote_identifier(base_table)};"
 
-    department_employee_count_intent = (
-        has_departments
-        and "department" in question_lower
-        and any(word in question_lower for word in ("employee", "employees", "staff", "worker", "workers"))
-        and any(phrase in question_lower for phrase in (
-            "most",
-            "least",
-            "highest",
-            "lowest",
-            "maximum",
-            "minimum",
-            "top",
-            "which",
-            "count",
-            "how many",
-            "number of",
-        ))
-    )
-    if department_employee_count_intent:
-        order_direction = "ASC" if any(word in question_lower for word in ("least", "lowest", "minimum")) else "DESC"
-        limit_clause = " LIMIT 1" if any(word in question_lower for word in ("most", "least", "highest", "lowest", "maximum", "minimum", "top", "which")) else ""
-        return (
-            "SELECT d.department_id, d.department_name, d.location, d.budget, COUNT(e.employee_id) AS employee_count "
-            "FROM departments d "
-            "LEFT JOIN employees e ON e.department_id = d.department_id "
-            "GROUP BY d.department_id, d.department_name, d.location, d.budget "
-            f"ORDER BY employee_count {order_direction}{limit_clause};"
-        )
+    for table_name in list(needed_tables):
+        if table_name == base_table:
+            continue
+        for step in find_join_path(schema_info, base_table, table_name):
+            needed_tables.add(step[1])
 
-    if "count" in question_lower or "how many" in question_lower or "number of" in question_lower:
-        if has_departments and "department" in question_lower:
-            add_departments_join()
-            return (
-                "SELECT d.department_name, COUNT(*) AS employee_count "
-                "FROM employees e "
-                + " ".join(joins)
-                + " GROUP BY d.department_name ORDER BY employee_count DESC;"
-            )
-        return "SELECT COUNT(*) AS employee_count FROM employees e;"
+    ordered_tables = [base_table] + [table_name for table_name in tables if table_name in needed_tables and table_name != base_table]
+    aliases = build_aliases(ordered_tables)
+    joins = join_sql_for_tables(schema_info, base_table, ordered_tables, aliases)
+    select_columns = [f"{aliases[base_table]}.*"]
+    for table_name in ordered_tables:
+        if table_name == base_table:
+            continue
+        for column_name in column_names(schema_info, table_name):
+            if tokens := (question_tokens(question) & name_tokens(column_name)):
+                select_columns.append(f"{aliases[table_name]}.{quote_identifier(column_name)}")
+                break
 
-    if ("average" in question_lower or "avg" in question_lower) and "salary" in question_lower:
-        add_salaries_join()
-        if has_departments and "department" in question_lower:
-            add_departments_join()
-            return (
-                "SELECT d.department_name, AVG(s.base_salary) AS average_salary "
-                "FROM employees e "
-                + " ".join(joins)
-                + " GROUP BY d.department_name ORDER BY average_salary DESC;"
-            )
-        return "SELECT AVG(s.base_salary) AS average_salary FROM employees e JOIN salaries s ON e.employee_id = s.employee_id;"
+    where_parts = []
+    for table_name, condition in conditions:
+        where_parts.append(condition.replace("{alias}", aliases[table_name]))
 
     order_by = ""
-    if "highest" in question_lower and has_salaries:
-        add_salaries_join()
-        order_by = " ORDER BY s.base_salary DESC"
-    elif "lowest" in question_lower and has_salaries:
-        add_salaries_join()
-        order_by = " ORDER BY s.base_salary ASC"
+    if numeric_column and any(term in question_lower for term in ("highest", "top", "most")):
+        order_by = f" ORDER BY {aliases[base_table]}.{quote_identifier(numeric_column)} DESC"
+    elif numeric_column and any(term in question_lower for term in ("lowest", "least")):
+        order_by = f" ORDER BY {aliases[base_table]}.{quote_identifier(numeric_column)} ASC"
 
-    select_sql = ", ".join(dict.fromkeys(select_parts))
-    sql = f"SELECT {select_sql} FROM employees e"
+    sql = f"SELECT {', '.join(dict.fromkeys(select_columns))} FROM {quote_identifier(base_table)} {aliases[base_table]}"
     if joins:
         sql += " " + " ".join(joins)
-    if conditions:
-        sql += " WHERE " + " AND ".join(conditions)
-    sql += order_by
-    sql += ";"
+    if where_parts:
+        sql += " WHERE " + " AND ".join(where_parts)
+    sql += order_by + ";"
     return sql
+
+
+def is_specific_schema_plan(question, plan_sql):
+    if not plan_sql:
+        return False
+    question_lower = question.lower()
+    return (
+        " WHERE " in plan_sql
+        or " GROUP BY " in plan_sql
+        or " ORDER BY " in plan_sql
+        or " JOIN " in plan_sql
+        or "COUNT(" in plan_sql
+        or any(term in question_lower for term in ("table", "details", "after", "before", "since", "in "))
+    )
 
 
 def format_prompt_with_schema(nl_question, schema_info=None, examples=None, dialect="SQLite"):
@@ -425,13 +574,13 @@ def generate_and_execute_with_repair(question, schema, model_name, dialect, exec
     """Generate SQL, execute it, and retry with schema/error feedback if needed."""
     attempts = []
     sql_result = generate_sql_with_ollama(question, schema, model_name, dialect=dialect)
-    fallback_sql = build_employee_system_fallback_sql(question, schema)
-    if is_specific_employee_fallback(question, fallback_sql):
+    fallback_sql = build_generic_schema_plan(question, schema)
+    if is_specific_schema_plan(question, fallback_sql):
         try:
             execution = executor(fallback_sql)
             attempts.append({
                 "sql": fallback_sql,
-                "repair": "schema-driven query plan",
+                "repair": "generic schema-driven query plan",
             })
             return fallback_sql, execution, attempts
         except ValueError as fallback_exc:
@@ -455,7 +604,7 @@ def generate_and_execute_with_repair(question, schema, model_name, dialect, exec
                     execution = executor(fallback_sql)
                     attempts.append({
                         "sql": fallback_sql,
-                        "repair": "schema-driven fallback",
+                        "repair": "generic schema-driven fallback",
                     })
                     return fallback_sql, execution, attempts
                 except ValueError as fallback_exc:
