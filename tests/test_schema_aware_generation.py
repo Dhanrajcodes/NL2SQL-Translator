@@ -193,7 +193,7 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         self.assertEqual(body["execution"]["row_count"], 2)
         self.assertIn("JOIN departments", body["sql"])
         self.assertNotIn(" job_title ", body["sql"])
-        self.assertTrue(any(attempt.get("repair") == "schema-driven fallback" for attempt in body["repair_attempts"]))
+        self.assertTrue(any(attempt.get("repair") == "schema-driven query plan" for attempt in body["repair_attempts"]))
 
     def test_employee_system_database_question_executes_without_model_repair(self):
         real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
@@ -226,6 +226,35 @@ class SchemaAwareGenerationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, body)
         self.assertGreater(body["execution"]["row_count"], 0)
         self.assertIn("JOIN departments", body["sql"])
+
+    def test_employee_system_hired_after_year_uses_hire_date_filter(self):
+        real_db_path = Path(__file__).resolve().parents[1] / "employee system.db"
+        responses = [
+            {"response": "SELECT e.* FROM employees e;"}
+        ]
+
+        with real_db_path.open("rb") as db_file:
+            with patch("app.app.ollama.generate", side_effect=responses):
+                response = self.client.post(
+                    "/query",
+                    data={
+                        "question": "Show all employees hired after 2020",
+                        "model": "test-model",
+                        "row_limit": "100",
+                        "dialect": "SQLite",
+                        "db_file": (db_file, real_db_path.name),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200, body)
+        self.assertIn("hire_date > '2020-12-31'", body["sql"])
+        self.assertGreater(body["execution"]["row_count"], 0)
+        self.assertTrue(
+            all(row["hire_date"] > "2020-12-31" for row in body["execution"]["rows"]),
+            body["execution"]["rows"],
+        )
 
 
 if __name__ == "__main__":

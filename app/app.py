@@ -121,6 +121,30 @@ def sql_literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def extract_year(question):
+    match = re.search(r"\b(19\d{2}|20\d{2})\b", question)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def is_specific_employee_fallback(question, fallback_sql):
+    if not fallback_sql:
+        return False
+
+    question_lower = question.lower()
+    specific_terms = (
+        "after", "before", "since", "from", "in ",
+        "department", "engineering", "sales", "finance", "operations", "human resources", "hr",
+        "job", "title", "role", "engineer", "manager", "analyst", "coordinator", "executive", "representative",
+        "salary", "salaries", "pay", "compensation", "bonus", "highest", "lowest", "average",
+        "active", "leave", "status", "count", "how many", "number of", "hired", "hire date", "joined", "joining",
+    )
+    return " WHERE " in fallback_sql or " GROUP BY " in fallback_sql or " ORDER BY " in fallback_sql or any(
+        term in question_lower for term in specific_terms
+    )
+
+
 def build_employee_system_fallback_sql(question, schema_info):
     """Build executable SQL for common company/employee demo prompts."""
     if not schema_has_table(schema_info, "employees"):
@@ -193,6 +217,18 @@ def build_employee_system_fallback_sql(question, schema_info):
             conditions.append("LOWER(e.employment_status) = LOWER('Active')")
         elif "leave" in question_lower or "on leave" in question_lower:
             conditions.append("LOWER(e.employment_status) = LOWER('On Leave')")
+
+    if schema_has_column(schema_info, "employees", "hire_date") and any(
+        word in question_lower for word in ("hire", "hired", "joining", "joined", "start date", "started")
+    ):
+        year = extract_year(question)
+        if year:
+            if "after" in question_lower or "since" in question_lower:
+                conditions.append(f"e.hire_date > '{year}-12-31'")
+            elif "before" in question_lower:
+                conditions.append(f"e.hire_date < '{year}-01-01'")
+            elif "in" in question_lower or "during" in question_lower:
+                conditions.append(f"e.hire_date >= '{year}-01-01' AND e.hire_date <= '{year}-12-31'")
 
     if "count" in question_lower or "how many" in question_lower or "number of" in question_lower:
         if has_departments and "department" in question_lower:
@@ -352,6 +388,16 @@ def generate_and_execute_with_repair(question, schema, model_name, dialect, exec
     attempts = []
     sql_result = generate_sql_with_ollama(question, schema, model_name, dialect=dialect)
     fallback_sql = build_employee_system_fallback_sql(question, schema)
+    if is_specific_employee_fallback(question, fallback_sql):
+        try:
+            execution = executor(fallback_sql)
+            attempts.append({
+                "sql": fallback_sql,
+                "repair": "schema-driven query plan",
+            })
+            return fallback_sql, execution, attempts
+        except ValueError as fallback_exc:
+            attempts.append({"sql": fallback_sql, "error": str(fallback_exc)})
 
     for attempt_number in range(max_repairs + 1):
         if not sql_result:
